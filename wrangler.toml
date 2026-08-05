@@ -10,4 +10,4 @@ crons = ["0 0 * * 1"]
 # 下の "REPLACE_ME_WITH_KV_NAMESPACE_ID" に貼り付けること。
 [[kv_namespaces]]
 binding = "DIGEST_KV"
-id = "REPLACE_ME_WITH_KV_NAMESPACE_ID"
+id = "c464f4638cd34b3ab9ba816bfe409cb1"
