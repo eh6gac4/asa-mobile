@@ -1,7 +1,8 @@
 # asa-mobile
 
-Android Weekly / iOS Dev Weekly / TLDR AI のRSSを毎週まとめてGeminiで日本語要約し、
+Android Weekly / iOS Dev Weekly / TLDR AI のRSSをGeminiで日本語要約し、
 Cloudflare Workers上でパブリックなWebページとして公開するツール。個人利用。
+TLDR AI(日刊)は毎日、Android Weekly / iOS Dev Weekly(週刊)は月曜のみ更新する。
 
 詳しいアーキテクチャや技術的負債は [`HANDOFF.md`](./HANDOFF.md) を参照。
 
@@ -43,7 +44,8 @@ npm run deploy
 
 ### 6. 動作確認
 
-cronの発火(毎週月曜9:00 JST)を待たずに手動実行できる。
+cronの発火(毎日9:00 JST。週刊ソースは月曜のみ)を待たずに手動実行できる。
+`/run` は3ソースすべてを対象に実行する。
 
 ```bash
 curl -X POST https://<デプロイ先のURL>/run

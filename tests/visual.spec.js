@@ -8,6 +8,7 @@ const mockDigest = {
       source: "Android Weekly",
       title: "Android Weekly Issue #738",
       link: "https://androidweekly.net/issues/issue-738/",
+      generatedAt: "2026-08-03T00:00:00.000Z",
       summary:
         "* **Jetpack Composeの5周年記念**: プロトタイプからの歩みを振り返る。\n" +
         "* 通常の箇条書き行はそのまま\n" +
@@ -96,6 +97,14 @@ test("staleなソースは前回の内容と注記が表示される", async ({ 
   await expect(card).toContainText("前回時点の要約");
   await expect(card.locator(".stale-note")).toContainText("前回");
   await expect(card.locator(".stale-note")).toContainText("の内容を表示中");
+});
+
+test("通常のソースには最終更新日が表示される(週次/日次の混在が分かるように)", async ({ page }) => {
+  await page.setContent(renderHtml(mockDigest));
+
+  const card = page.locator(".card").first();
+  await expect(card.locator(".updated-note")).toContainText("更新:");
+  await expect(card.locator(".stale-note")).toHaveCount(0);
 });
 
 test("ダイジェスト未生成時は案内メッセージが表示される", async ({ page }) => {

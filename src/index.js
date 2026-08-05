@@ -1,8 +1,8 @@
 import { XMLParser } from "fast-xml-parser";
 
 // 取得するRSSフィード一覧。
-// mode: "single" -> 週刊フィード。最新1件のみ使用
-// mode: "multi"  -> 日刊フィード。直近5件を連結して1週間分として扱う
+// mode: "single" -> 週刊フィード。最新1件のみ使用。cronは月曜のみ取得する(isWeeklyRefreshDay参照)
+// mode: "multi"  -> 日刊フィード。直近5件を連結して1週間分として扱う。cronは毎日取得する
 const FEEDS = [
   {
     name: "Android Weekly",
@@ -185,33 +185,45 @@ async function processFeedSource(env, feed) {
 }
 
 /**
- * 全フィードを取得・要約してKVに保存する。
+ * 指定フィードを取得・要約してKVに保存する。
  * フィード単位でtry/catchし、1つ失敗しても他は続行する。
+ *
+ * feedsToProcess を渡さない場合は全フィードが対象(手動実行の /run 用)。
+ * 渡した場合、対象外のフィード(例: 月曜以外の日のAndroid/iOS Weekly)は
+ * 取得を行わず、KVに残っている前回の結果をそのまま引き継ぐ。
  *
  * リトライ後もなお失敗したソースは、KVに残っている前回成功分を代わりに使い
  * (stale: trueを付与)、表示が「取得失敗」で丸ごと潰れないようにする。
  * 前回分も無ければ従来通りエラーを記録する。
  */
-async function generateDigest(env) {
+async function generateDigest(env, feedsToProcess = FEEDS) {
   const prevRaw = await env.DIGEST_KV.get("latest");
   const prevDigest = prevRaw ? JSON.parse(prevRaw) : null;
   const prevBySource = new Map();
   if (prevDigest) {
     for (const item of prevDigest.items) {
-      if (!item.error) prevBySource.set(item.source, item);
+      prevBySource.set(item.source, item);
     }
   }
 
   const nowISO = new Date().toISOString();
+  const targetNames = new Set(feedsToProcess.map((f) => f.name));
   const results = [];
 
   for (const feed of FEEDS) {
+    if (!targetNames.has(feed.name)) {
+      // 今回は対象外(例: 週次ソースを非月曜に実行しない)。前回の結果を維持する。
+      const prevItem = prevBySource.get(feed.name);
+      if (prevItem) results.push(prevItem);
+      continue;
+    }
+
     try {
       const fresh = await processFeedSource(env, feed);
       results.push({ ...fresh, generatedAt: nowISO });
     } catch (err) {
       const prevItem = prevBySource.get(feed.name);
-      if (prevItem) {
+      if (prevItem && !prevItem.error) {
         results.push({ ...prevItem, stale: true });
       } else {
         results.push({
@@ -326,11 +338,19 @@ export function renderHtml(digest) {
                 new Date(item.generatedAt).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" }),
               )})の内容を表示中</p>`
             : "";
+          // ソースごとに更新頻度が異なる(TLDR AIは毎日、Android/iOS Weeklyは週次)ため、
+          // 各カードに最終更新日を出して古さが分かるようにする。
+          const updatedNote =
+            !item.stale && item.generatedAt
+              ? `<p class="updated-note">更新: ${escapeHtml(
+                  new Date(item.generatedAt).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" }),
+                )}</p>`
+              : "";
           return `
         <section class="card">
           <h2>${sourceHeading}</h2>
           <p class="original-title">${escapeHtml(item.title)}</p>
-          ${staleNote}
+          ${staleNote}${updatedNote}
           <ul>${summaryHtml}</ul>
         </section>`;
         })
@@ -355,6 +375,7 @@ export function renderHtml(digest) {
   .card-error { border-left: 4px solid #d33; }
   .error { color: #d33; }
   .stale-note { color: #a67c00; font-size: 0.75rem; margin: 0 0 8px; }
+  .updated-note { color: #999; font-size: 0.75rem; margin: 0 0 8px; }
 </style>
 </head>
 <body>
@@ -365,16 +386,28 @@ ${body}
 </html>`;
 }
 
-// リトライ用cron ("0 4 * * 1" = 本番cronの4時間後)。この文字列はwrangler.tomlの
+// リトライ用cron ("0 4 * * *" = 本番cronの4時間後、毎日)。この文字列はwrangler.tomlの
 // [triggers].crons と一致させること。
-const RETRY_CRON = "0 4 * * 1";
+const RETRY_CRON = "0 4 * * *";
+
+/**
+ * mode: "single" の週次ソース(Android Weekly / iOS Dev Weekly)を取得してよい日か。
+ * 週1回しか新しい号が出ないため、毎日取得しても同じ号を再要約するだけで
+ * Gemini呼び出しの無駄になる。月曜(cronは00:00 UTC=9:00 JST)のみ取得する。
+ */
+function isWeeklyRefreshDay(scheduledTime) {
+  return new Date(scheduledTime).getUTCDay() === 1; // 1 = Monday
+}
 
 export default {
   async scheduled(event, env, ctx) {
     if (event.cron === RETRY_CRON) {
       ctx.waitUntil(retryFailedSources(env));
     } else {
-      ctx.waitUntil(generateDigest(env));
+      const feedsToProcess = FEEDS.filter(
+        (feed) => feed.mode === "multi" || isWeeklyRefreshDay(event.scheduledTime),
+      );
+      ctx.waitUntil(generateDigest(env, feedsToProcess));
     }
   },
 
