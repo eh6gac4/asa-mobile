@@ -415,6 +415,11 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "POST" && url.pathname === "/run") {
+      // 認証なしで公開すると、URLを知っている誰でもこのエンドポイントを叩いて
+      // こちらのGemini APIキーでリクエストを消費できてしまう。共有シークレットで保護する。
+      if (request.headers.get("x-run-secret") !== env.RUN_SECRET) {
+        return new Response("Unauthorized", { status: 401 });
+      }
       const digest = await generateDigest(env);
       return new Response(JSON.stringify(digest, null, 2), {
         headers: { "Content-Type": "application/json; charset=utf-8" },

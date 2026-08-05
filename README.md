@@ -36,19 +36,29 @@ npx wrangler kv namespace create DIGEST_KV
 npx wrangler secret put GEMINI_API_KEY
 ```
 
-### 5. デプロイ
+### 5. `/run` 用のシークレットを登録
+
+`/run` は認証なしで公開するとURLを知る誰でも叩けて、こちらのGemini APIキーを消費されてしまう。
+ランダムな値を生成してSecretとして登録する。
+
+```bash
+node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
+npx wrangler secret put RUN_SECRET
+```
+
+### 6. デプロイ
 
 ```bash
 npm run deploy
 ```
 
-### 6. 動作確認
+### 7. 動作確認
 
 cronの発火(毎日9:00 JST。週刊ソースは月曜のみ)を待たずに手動実行できる。
-`/run` は3ソースすべてを対象に実行する。
+`/run` は3ソースすべてを対象に実行する。`x-run-secret` ヘッダーに手順5で登録した値を渡す。
 
 ```bash
-curl -X POST https://<デプロイ先のURL>/run
+curl -X POST https://<デプロイ先のURL>/run -H "x-run-secret: <RUN_SECRETの値>"
 ```
 
 以下を確認する:
@@ -66,6 +76,8 @@ npm run dev
 
 `wrangler dev` はローカルで動作するが、KVやSecretはCloudflare側の設定を参照する
 (`wrangler dev --local` を使う場合はローカルKVになるため別途データが必要)。
+
+`.dev.vars` に `GEMINI_API_KEY` と `RUN_SECRET` を書いておくとローカル実行時にそちらが使われる。
 
 ## 見た目のテスト(Playwright)
 
