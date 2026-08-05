@@ -67,6 +67,20 @@ async function fetchFeedItems(feedUrl) {
   return items;
 }
 
+/**
+ * itemのリンクURLを取り出す。<link> が無いフィード(TLDR AIミラー等)は
+ * <guid isPermaLink="true"> にURLを持つため、そちらにフォールバックする。
+ */
+function extractLink(item) {
+  if (typeof item?.link === "string" && item.link) return item.link;
+  const linkText = item?.link?.["#text"];
+  if (typeof linkText === "string" && linkText) return linkText;
+  if (typeof item?.guid === "string" && item.guid) return item.guid;
+  const guidText = item?.guid?.["#text"];
+  if (typeof guidText === "string" && guidText) return guidText;
+  return "";
+}
+
 function buildSourceContent(feed, items) {
   const picked = feed.mode === "single" ? items.slice(0, 1) : items.slice(0, MULTI_ITEM_LIMIT);
 
@@ -80,7 +94,7 @@ function buildSourceContent(feed, items) {
 
   return {
     combinedText: combined,
-    latestLink: typeof picked[0]?.link === "string" ? picked[0].link : picked[0]?.link?.["#text"] ?? "",
+    latestLink: extractLink(picked[0]),
   };
 }
 
@@ -201,9 +215,14 @@ export function renderHtml(digest) {
             .map((line) => renderInlineMarkdown(line.replace(/^(?:[-*]\s+|・\s*)/, "")))
             .map((line) => `<li>${line}</li>`)
             .join("");
+          // リンク先が取れなかった場合、href="" は現在のページ自身を指してしまうため
+          // <a> ではなくプレーンテキストで表示する。
+          const sourceHeading = item.link
+            ? `<a href="${escapeHtml(item.link)}" target="_blank" rel="noopener">${escapeHtml(item.source)}</a>`
+            : escapeHtml(item.source);
           return `
         <section class="card">
-          <h2><a href="${escapeHtml(item.link)}" target="_blank" rel="noopener">${escapeHtml(item.source)}</a></h2>
+          <h2>${sourceHeading}</h2>
           <p class="original-title">${escapeHtml(item.title)}</p>
           <ul>${summaryHtml}</ul>
         </section>`;

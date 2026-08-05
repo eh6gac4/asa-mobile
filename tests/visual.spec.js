@@ -56,6 +56,25 @@ test("取得失敗したソースはエラーカードとして表示される",
   await expect(errorCard).toContainText("取得失敗");
 });
 
+test("リンクが取得できなかったソースは自己参照アンカー(href=\"\")にならない", async ({ page }) => {
+  const digestWithoutLink = {
+    generatedAt: "2026-08-05T00:00:00.000Z",
+    items: [
+      {
+        source: "TLDR AI",
+        title: "Some newsletter issue",
+        link: "",
+        summary: "* 要約テキスト",
+      },
+    ],
+  };
+  await page.setContent(renderHtml(digestWithoutLink));
+
+  const heading = page.locator(".card h2").first();
+  await expect(heading).toHaveText("TLDR AI");
+  await expect(heading.locator("a")).toHaveCount(0);
+});
+
 test("ダイジェスト未生成時は案内メッセージが表示される", async ({ page }) => {
   await page.setContent(renderHtml(null));
 
