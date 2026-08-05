@@ -6,12 +6,14 @@
   "description": "Android Weekly / iOS Dev Weekly / TLDR AI のRSSを毎週まとめてGeminiで日本語要約し、Cloudflare Workers上で配信するツール",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test:visual": "playwright test"
   },
   "dependencies": {
     "fast-xml-parser": "^4.5.0"
   },
   "devDependencies": {
-    "wrangler": "^4.118.0"
+    "wrangler": "^4.118.0",
+    "@playwright/test": "^1.62.1"
   }
 }

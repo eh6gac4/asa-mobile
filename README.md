@@ -65,6 +65,24 @@ npm run dev
 `wrangler dev` はローカルで動作するが、KVやSecretはCloudflare側の設定を参照する
 (`wrangler dev --local` を使う場合はローカルKVになるため別途データが必要)。
 
+## 見た目のテスト(Playwright)
+
+`renderHtml()` が生成するHTMLをブラウザに読み込ませて構造・見た目を検証する。
+Gemini出力に混ざるMarkdown記法(`**text**`など)が正しく`<strong>`に変換されているか、
+というような表示崩れを検知する目的。
+
+初回のみブラウザ本体が要る:
+
+```bash
+npx playwright install chromium
+```
+
+実行:
+
+```bash
+npm run test:visual
+```
+
 ## ライセンス
 
 個人利用ツールのため特に設定なし。

@@ -170,7 +170,15 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
-function renderHtml(digest) {
+/**
+ * Geminiの出力にMarkdownの太字記法(**text**)が混ざることがあるため、
+ * エスケープ済みテキストに対してのみ <strong> に変換する。
+ */
+function renderInlineMarkdown(escapedText) {
+  return escapedText.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+}
+
+export function renderHtml(digest) {
   const generatedAtLabel = digest
     ? new Date(digest.generatedAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })
     : null;
@@ -188,7 +196,10 @@ function renderHtml(digest) {
           const summaryHtml = escapeHtml(item.summary)
             .split("\n")
             .filter((line) => line.trim().length > 0)
-            .map((line) => `<li>${line.replace(/^[-*・]\s*/, "")}</li>`)
+            // 箇条書きマーカー除去: "-"/"*" は直後にスペースがある場合のみマーカーとみなす。
+            // スペース任意にすると "**hoge**" の先頭 "*" だけを誤って剥がしてしまう。
+            .map((line) => renderInlineMarkdown(line.replace(/^(?:[-*]\s+|・\s*)/, "")))
+            .map((line) => `<li>${line}</li>`)
             .join("");
           return `
         <section class="card">
