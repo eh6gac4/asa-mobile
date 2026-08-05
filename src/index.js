@@ -29,6 +29,10 @@ const GEMINI_MODEL = "gemini-3.6-flash";
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
+  // 標準entity(&lt; &gt; &quot; 等)がRSS本文中に大量出現するフィードがあり、
+  // デフォルトの上限(1000)だと billion-laughs対策の上限に誤爆する。実測18939件
+  // (iOS Dev Weekly)を踏まえ余裕を持った値に引き上げる。
+  processEntities: { maxTotalExpansions: 50000 },
 });
 
 /**
