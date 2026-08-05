@@ -2,9 +2,10 @@ name = "asa-mobile"
 main = "src/index.js"
 compatibility_date = "2026-08-01"
 
-# 毎週月曜 00:00 UTC = 9:00 JST
+# 毎週月曜 00:00 UTC = 9:00 JST (本番) / 04:00 UTC = 13:00 JST (Gemini一時エラー時のリトライ)
+# リトライ側の文字列はsrc/index.jsのRETRY_CRONと一致させること。
 [triggers]
-crons = ["0 0 * * 1"]
+crons = ["0 0 * * 1", "0 4 * * 1"]
 
 # `npx wrangler kv namespace create DIGEST_KV` を実行して出力された id を
 # 下の "REPLACE_ME_WITH_KV_NAMESPACE_ID" に貼り付けること。

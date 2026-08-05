@@ -26,6 +26,16 @@ const FEEDS = [
 const MULTI_ITEM_LIMIT = 5;
 const GEMINI_MODEL = "gemini-3.6-flash";
 
+// Gemini APIの一時エラー(高負荷時の503等)向けリトライ設定。
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 2000;
+const RETRY_MAX_DELAY_MS = 60000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
@@ -104,6 +114,9 @@ function buildSourceContent(feed, items) {
  * 注意: Gemini 3.x系では temperature / top_p / top_k が廃止されており、
  * generationConfig.thinkingConfig.thinkingLevel で思考量を制御する方式になっている。
  * 古いパラメータは渡さないこと。
+ *
+ * 429/5xx (高負荷時の503等)は一時的なエラーとみなし、指数バックオフでリトライする。
+ * Retry-Afterヘッダがあればそちらを優先する（上限あり）。
  */
 async function summarize(env, sourceName, text) {
   const prompt =
@@ -111,69 +124,156 @@ async function summarize(env, sourceName, text) {
     `日本語で3〜5個の箇条書きに要約してください。前置きや結びの文は不要、箇条書きのみ出力してください。\n\n${text}`;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": env.GEMINI_API_KEY,
-    },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        thinkingConfig: { thinkingLevel: "low" },
+
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": env.GEMINI_API_KEY,
       },
-    }),
-  });
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          thinkingConfig: { thinkingLevel: "low" },
+        },
+      }),
+    });
 
-  if (!res.ok) {
+    if (res.ok) {
+      const data = await res.json();
+      const summaryText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!summaryText) {
+        throw new Error(`Gemini APIレスポンスの形式が想定外 (${sourceName}): ${JSON.stringify(data)}`);
+      }
+      return summaryText.trim();
+    }
+
     const errBody = await res.text().catch(() => "");
-    throw new Error(`Gemini API失敗 (${sourceName}): status ${res.status} ${errBody}`);
+    lastErr = new Error(`Gemini API失敗 (${sourceName}): status ${res.status} ${errBody}`);
+
+    const retryable = RETRYABLE_STATUS.has(res.status);
+    if (!retryable || attempt === MAX_ATTEMPTS) {
+      throw lastErr;
+    }
+
+    const retryAfterSec = Number(res.headers.get("Retry-After"));
+    const delayMs =
+      Number.isFinite(retryAfterSec) && retryAfterSec > 0
+        ? Math.min(retryAfterSec * 1000, RETRY_MAX_DELAY_MS)
+        : Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS);
+    await sleep(delayMs);
   }
 
-  const data = await res.json();
-  const summaryText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!summaryText) {
-    throw new Error(`Gemini APIレスポンスの形式が想定外 (${sourceName}): ${JSON.stringify(data)}`);
-  }
-  return summaryText.trim();
+  throw lastErr;
+}
+
+/**
+ * 1フィードを取得・要約する。generateDigest/retryFailedSourcesの両方から使う。
+ */
+async function processFeedSource(env, feed) {
+  const items = await fetchFeedItems(feed.url);
+  const { combinedText, latestLink } = buildSourceContent(feed, items);
+  const summary = await summarize(env, feed.name, combinedText);
+  return {
+    source: feed.name,
+    title: stripHtml(items[0]?.title),
+    link: latestLink,
+    summary,
+  };
 }
 
 /**
  * 全フィードを取得・要約してKVに保存する。
  * フィード単位でtry/catchし、1つ失敗しても他は続行する。
+ *
+ * リトライ後もなお失敗したソースは、KVに残っている前回成功分を代わりに使い
+ * (stale: trueを付与)、表示が「取得失敗」で丸ごと潰れないようにする。
+ * 前回分も無ければ従来通りエラーを記録する。
  */
 async function generateDigest(env) {
+  const prevRaw = await env.DIGEST_KV.get("latest");
+  const prevDigest = prevRaw ? JSON.parse(prevRaw) : null;
+  const prevBySource = new Map();
+  if (prevDigest) {
+    for (const item of prevDigest.items) {
+      if (!item.error) prevBySource.set(item.source, item);
+    }
+  }
+
+  const nowISO = new Date().toISOString();
   const results = [];
 
   for (const feed of FEEDS) {
     try {
-      const items = await fetchFeedItems(feed.url);
-      const { combinedText, latestLink } = buildSourceContent(feed, items);
-      const summary = await summarize(env, feed.name, combinedText);
-      results.push({
-        source: feed.name,
-        title: stripHtml(items[0]?.title),
-        link: latestLink,
-        summary,
-      });
+      const fresh = await processFeedSource(env, feed);
+      results.push({ ...fresh, generatedAt: nowISO });
     } catch (err) {
-      results.push({
-        source: feed.name,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const prevItem = prevBySource.get(feed.name);
+      if (prevItem) {
+        results.push({ ...prevItem, stale: true });
+      } else {
+        results.push({
+          source: feed.name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 
-  const digest = {
-    generatedAt: new Date().toISOString(),
-    items: results,
-  };
+  const digest = { generatedAt: nowISO, items: results };
 
   const dateKey = digest.generatedAt.slice(0, 10); // YYYY-MM-DD
   await env.DIGEST_KV.put("latest", JSON.stringify(digest));
   await env.DIGEST_KV.put(`history:${dateKey}`, JSON.stringify(digest));
 
   return digest;
+}
+
+/**
+ * 前回の実行で失敗(error)またはフォールバック(stale)扱いだったソースだけを再要約する。
+ * 数時間後のリトライ用cronから呼ばれる。全ソースが成功済みなら何もしない
+ * (Gemini/RSSを無駄に叩かない)。
+ */
+async function retryFailedSources(env) {
+  const raw = await env.DIGEST_KV.get("latest");
+  if (!raw) return null;
+
+  const digest = JSON.parse(raw);
+  const needsRetry = digest.items.some((item) => item.error || item.stale);
+  if (!needsRetry) return digest;
+
+  const nowISO = new Date().toISOString();
+  const updatedItems = [];
+
+  for (const item of digest.items) {
+    if (!item.error && !item.stale) {
+      updatedItems.push(item);
+      continue;
+    }
+
+    const feed = FEEDS.find((f) => f.name === item.source);
+    if (!feed) {
+      updatedItems.push(item);
+      continue;
+    }
+
+    try {
+      const fresh = await processFeedSource(env, feed);
+      updatedItems.push({ ...fresh, generatedAt: nowISO });
+    } catch {
+      // リトライも失敗。既存のerror/staleエントリをそのまま維持する。
+      updatedItems.push(item);
+    }
+  }
+
+  const digestOut = { generatedAt: nowISO, items: updatedItems };
+  const dateKey = digestOut.generatedAt.slice(0, 10);
+  await env.DIGEST_KV.put("latest", JSON.stringify(digestOut));
+  await env.DIGEST_KV.put(`history:${dateKey}`, JSON.stringify(digestOut));
+
+  return digestOut;
 }
 
 function escapeHtml(str) {
@@ -220,10 +320,17 @@ export function renderHtml(digest) {
           const sourceHeading = item.link
             ? `<a href="${escapeHtml(item.link)}" target="_blank" rel="noopener">${escapeHtml(item.source)}</a>`
             : escapeHtml(item.source);
+          // stale: 最新取得に失敗し、KVに残っていた前回成功分を代わりに表示している。
+          const staleNote = item.stale
+            ? `<p class="stale-note">前回(${escapeHtml(
+                new Date(item.generatedAt).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" }),
+              )})の内容を表示中</p>`
+            : "";
           return `
         <section class="card">
           <h2>${sourceHeading}</h2>
           <p class="original-title">${escapeHtml(item.title)}</p>
+          ${staleNote}
           <ul>${summaryHtml}</ul>
         </section>`;
         })
@@ -247,6 +354,7 @@ export function renderHtml(digest) {
   .card ul { margin: 0; padding-left: 1.2em; }
   .card-error { border-left: 4px solid #d33; }
   .error { color: #d33; }
+  .stale-note { color: #a67c00; font-size: 0.75rem; margin: 0 0 8px; }
 </style>
 </head>
 <body>
@@ -257,9 +365,17 @@ ${body}
 </html>`;
 }
 
+// リトライ用cron ("0 4 * * 1" = 本番cronの4時間後)。この文字列はwrangler.tomlの
+// [triggers].crons と一致させること。
+const RETRY_CRON = "0 4 * * 1";
+
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(generateDigest(env));
+    if (event.cron === RETRY_CRON) {
+      ctx.waitUntil(retryFailedSources(env));
+    } else {
+      ctx.waitUntil(generateDigest(env));
+    }
   },
 
   async fetch(request, env) {

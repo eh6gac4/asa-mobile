@@ -75,6 +75,29 @@ test("リンクが取得できなかったソースは自己参照アンカー(h
   await expect(heading.locator("a")).toHaveCount(0);
 });
 
+test("staleなソースは前回の内容と注記が表示される", async ({ page }) => {
+  const digestWithStale = {
+    generatedAt: "2026-08-05T00:00:00.000Z",
+    items: [
+      {
+        source: "Android Weekly",
+        title: "Android Weekly Issue #737",
+        link: "https://androidweekly.net/issues/issue-737/",
+        summary: "* 前回時点の要約",
+        generatedAt: "2026-07-29T00:00:00.000Z",
+        stale: true,
+      },
+    ],
+  };
+  await page.setContent(renderHtml(digestWithStale));
+
+  const card = page.locator(".card").first();
+  await expect(card.locator(".card-error")).toHaveCount(0);
+  await expect(card).toContainText("前回時点の要約");
+  await expect(card.locator(".stale-note")).toContainText("前回");
+  await expect(card.locator(".stale-note")).toContainText("の内容を表示中");
+});
+
 test("ダイジェスト未生成時は案内メッセージが表示される", async ({ page }) => {
   await page.setContent(renderHtml(null));
 
