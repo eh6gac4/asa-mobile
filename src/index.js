@@ -58,6 +58,12 @@ function stripHtml(html) {
     .trim();
 }
 
+// アンカーテキストがこれらの汎用的な呼びかけ文言「だけ」の場合、記事本文とは
+// 無関係な広告・登録・購読・ナビゲーション用リンクである可能性が高いので候補から除く
+// （本番実行でiOS Dev Weeklyの候補にこの種のリンクが混ざり、Geminiが本文中のどのトピックにも
+// 対応付けられず全エントリのcandidateIndexをnullにする事例が発生したため）。
+const GENERIC_LINK_TEXT = /^(here|read more|learn more|click here|register|registration link|sign ?up|subscribe|discount code|home ?page|this (article|post)|link)$/i;
+
 /**
  * RSS本文のHTML中から <a href="URL">テキスト</a> をリンク候補として抽出する。
  * Geminiに「どの候補が生成したトピックに対応するか」を選ばせるための材料になる
@@ -76,6 +82,7 @@ function extractLinkCandidates(html) {
     const text = stripHtml(match[2]);
     if (!url || !text) continue;
     if (/^(#|mailto:|javascript:)/i.test(url)) continue;
+    if (GENERIC_LINK_TEXT.test(text.trim())) continue;
 
     const key = `${url} ${text}`;
     if (seen.has(key)) continue;
@@ -184,9 +191,11 @@ function buildPrompt(feed, built) {
       `以下は「${feed.name}」というニュースレターの直近号の内容です。` +
       `日本語で3〜5個のトピックに整理し、それぞれ見出し(15〜25字程度)と説明(1〜2文、40〜80字程度)を作成してください。` +
       `前置きや結びの文は不要です。\n` +
-      `各トピックについて、対応する記事が下記の候補リンク一覧にあれば、最も合致する番号を` +
-      `candidateIndexとして選んでください。無理に対応付けず、該当する記事が無ければ` +
-      `candidateIndexをnullにしてください。一覧に無いURLを作り出さないでください。\n\n` +
+      `候補リンク一覧には、本文中の各トピックへのリンクだけでなく、広告・イベント告知・` +
+      `他の号への相互リンクなど本文の内容と無関係なものも混ざっています。各トピックについて、` +
+      `そのトピックの内容と実際に一致する記事へのリンクが候補にあれば、最も合致する番号を` +
+      `candidateIndexとして選んでください。少しでも自信が無い場合や、該当する記事が無い場合は` +
+      `無理に対応付けずcandidateIndexをnullにしてください。一覧に無いURLを作り出さないでください。\n\n` +
       `# 候補リンク一覧\n${candidateLines || "(候補なし)"}\n\n` +
       `# 本文\n${built.combinedText}`
     );
@@ -243,7 +252,10 @@ async function summarizeEntries(env, feed, built) {
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
-          thinkingConfig: { thinkingLevel: "low" },
+          // single mode(候補リンクとの対応付け)は他トピックとの照合が必要な分、複雑な
+          // 推論が要る。multi modeはリンクが確定済みで見出し・説明文の生成だけなので
+          // "low"のままで十分（コスト・レイテンシ優先）。
+          thinkingConfig: { thinkingLevel: built.mode === "single" ? "medium" : "low" },
           responseMimeType: "application/json",
           responseSchema: buildResponseSchema(built),
         },
