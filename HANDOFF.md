@@ -34,11 +34,12 @@ asa-mobile/
 ## アーキテクチャ
 
 1. **Cron Trigger**（`wrangler.toml` の `[triggers] crons`）が2本ある:
-   - `0 0 * * *`（毎日9:00 JST）: 本番実行
-   - `0 4 * * *`（毎日13:00 JST）: 前回失敗/staleだったソースのみ再試行
+   - `0 20 * * *`（前日20:00 UTC=毎日5:00 JST）: 本番実行
+   - `0 0 * * *`（毎日9:00 JST）: 前回失敗/staleだったソースのみ再試行
 2. ソースごとに取得頻度が違う（`src/index.js` の `FEEDS` 配列の `mode` フィールド）:
    - `mode: "single"`（Android Weekly, iOS Dev Weekly）: 週刊フィード。最新1件のみ使用し、
-     本番cronでは**月曜のみ**取得する（`isWeeklyRefreshDay()`）。月曜以外はKVの前回値をそのまま維持
+     本番cronでは**JST基準の月曜のみ**取得する（`isWeeklyRefreshDay()`）。本番cronはUTC上は
+     前日20:00に発火するため、判定は必ずJSTに変換してから行う。月曜以外はKVの前回値をそのまま維持
    - `mode: "multi"`（TLDR AI）: 日刊フィードなので直近5件を連結し、**毎日**取得・要約する
 3. 各ソースのcontentをGemini API（`gemini-3.6-flash`）に投げ、`responseSchema`で構造化出力
    （見出し＋説明文＋元記事URLの配列 `entries`）を強制して日本語要約。429/5xxは指数バックオフで

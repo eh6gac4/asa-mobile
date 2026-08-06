@@ -1,7 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 
 // 取得するRSSフィード一覧。
-// mode: "single" -> 週刊フィード。最新1件のみ使用。cronは月曜のみ取得する(isWeeklyRefreshDay参照)
+// mode: "single" -> 週刊フィード。最新1件のみ使用。cronはJST基準の月曜のみ取得する(isWeeklyRefreshDay参照)
 // mode: "multi"  -> 日刊フィード。直近5件を連結して1週間分として扱う。cronは毎日取得する
 const FEEDS = [
   {
@@ -653,17 +653,24 @@ ${body}
 </html>`;
 }
 
-// リトライ用cron ("0 4 * * *" = 本番cronの4時間後、毎日)。この文字列はwrangler.tomlの
-// [triggers].crons と一致させること。
-const RETRY_CRON = "0 4 * * *";
+// リトライ用cron ("0 0 * * *" = 9:00 JST、本番cronの4時間後、毎日)。この文字列は
+// wrangler.tomlの [triggers].crons と一致させること。
+const RETRY_CRON = "0 0 * * *";
+
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
 /**
  * mode: "single" の週次ソース(Android Weekly / iOS Dev Weekly)を取得してよい日か。
  * 週1回しか新しい号が出ないため、毎日取得しても同じ号を再要約するだけで
- * Gemini呼び出しの無駄になる。月曜(cronは00:00 UTC=9:00 JST)のみ取得する。
+ * Gemini呼び出しの無駄になる。JST基準の月曜のみ取得する。
+ *
+ * 本番cronは20:00 UTC(前日)=5:00 JSTに発火するため、event.scheduledTimeのUTC上の
+ * 曜日とJSTの曜日がズレる（例: UTC日曜20:00 = JST月曜5:00）。判定を必ずJSTに
+ * 変換してから行うこと（そのままgetUTCDay()すると一日ズレて誤判定する）。
  */
 function isWeeklyRefreshDay(scheduledTime) {
-  return new Date(scheduledTime).getUTCDay() === 1; // 1 = Monday
+  const jst = new Date(new Date(scheduledTime).getTime() + JST_OFFSET_MS);
+  return jst.getUTCDay() === 1; // 1 = Monday (JST基準)
 }
 
 export default {
