@@ -9,10 +9,18 @@ const mockDigest = {
       title: "Android Weekly Issue #738",
       link: "https://androidweekly.net/issues/issue-738/",
       generatedAt: "2026-08-03T00:00:00.000Z",
-      summary:
-        "* **Jetpack Composeの5周年記念**: プロトタイプからの歩みを振り返る。\n" +
-        "* 通常の箇条書き行はそのまま\n" +
-        "* **太字が文中に混ざる**場合もある: 例えばこう。",
+      entries: [
+        {
+          headline: "**Jetpack Composeの5周年記念**",
+          description: "プロトタイプからの歩みを振り返る。",
+          url: "https://android-developers.googleblog.com/",
+        },
+        {
+          headline: "通常の見出しはそのまま",
+          description: "**太字が文中に混ざる**場合もある: 例えばこう。",
+          url: null,
+        },
+      ],
     },
     {
       source: "iOS Dev Weekly",
@@ -24,56 +32,66 @@ const mockDigest = {
 test("Markdownの太字記法(**text**)がstrongタグとしてレンダリングされ、生の**が残らない", async ({ page }) => {
   await page.setContent(renderHtml(mockDigest));
 
-  const items = page.locator(".card").first().locator("li");
-  await expect(items).toHaveCount(3);
+  const rows = page.locator('.row[data-source="android"]');
+  await expect(rows).toHaveCount(2);
 
-  // 1行目: 箇条書きマーカー "* " を剥がした上で **text** が <strong> に変換されていること
-  const firstItem = items.nth(0);
-  await expect(firstItem.locator("strong")).toHaveText("Jetpack Composeの5周年記念");
-  await expect(firstItem).not.toContainText("*");
+  // 見出しに太字が混ざるケース
+  const firstHeadline = rows.nth(0).locator(".headline");
+  await expect(firstHeadline.locator("strong")).toHaveText("Jetpack Composeの5周年記念");
+  await expect(firstHeadline).not.toContainText("*");
 
-  // 3行目: 文中に太字が混ざるケースも変換されること
-  const thirdItem = items.nth(2);
-  await expect(thirdItem.locator("strong")).toHaveText("太字が文中に混ざる");
-  await expect(thirdItem).not.toContainText("*");
+  // 説明文に太字が混ざるケース
+  const secondDesc = rows.nth(1).locator(".desc");
+  await expect(secondDesc.locator("strong")).toHaveText("太字が文中に混ざる");
+  await expect(secondDesc).not.toContainText("*");
 
   // ページ全体としてMarkdown記号の生テキストが残っていないこと
   await expect(page.locator("body")).not.toContainText("**");
 });
 
-test("通常の箇条書き行は先頭マーカーだけが除去され本文は保持される", async ({ page }) => {
+test("元記事URLがあるエントリの見出しはリンクになる", async ({ page }) => {
   await page.setContent(renderHtml(mockDigest));
 
-  const secondItem = page.locator(".card").first().locator("li").nth(1);
-  await expect(secondItem).toHaveText("通常の箇条書き行はそのまま");
+  const firstRow = page.locator('.row[data-source="android"]').nth(0);
+  const link = firstRow.locator("a.headline");
+  await expect(link).toHaveCount(1);
+  await expect(link).toHaveAttribute("href", "https://android-developers.googleblog.com/");
 });
 
-test("取得失敗したソースはエラーカードとして表示される", async ({ page }) => {
+test("元記事URLが無いエントリの見出しはリンクにならずプレーンテキストで表示される", async ({ page }) => {
   await page.setContent(renderHtml(mockDigest));
 
-  const errorCard = page.locator(".card-error");
-  await expect(errorCard).toBeVisible();
-  await expect(errorCard).toContainText("iOS Dev Weekly");
-  await expect(errorCard).toContainText("取得失敗");
+  const secondRow = page.locator('.row[data-source="android"]').nth(1);
+  await expect(secondRow.locator("a.headline")).toHaveCount(0);
+  await expect(secondRow.locator("span.headline")).toContainText("通常の見出しはそのまま");
 });
 
-test("リンクが取得できなかったソースは自己参照アンカー(href=\"\")にならない", async ({ page }) => {
-  const digestWithoutLink = {
+test("取得失敗したソースはエラー行として表示される", async ({ page }) => {
+  await page.setContent(renderHtml(mockDigest));
+
+  const errorRow = page.locator(".row.error");
+  await expect(errorRow).toBeVisible();
+  await expect(errorRow).toContainText("iOS Dev Weekly");
+  await expect(errorRow).toContainText("取得失敗");
+});
+
+test("号のリンクが取得できなかったソースは自己参照アンカー(href=\"\")にならない", async ({ page }) => {
+  const digestWithoutIssueLink = {
     generatedAt: "2026-08-05T00:00:00.000Z",
     items: [
       {
         source: "TLDR AI",
-        title: "Some newsletter issue",
+        title: "",
         link: "",
-        summary: "* 要約テキスト",
+        generatedAt: "2026-08-05T00:00:00.000Z",
+        entries: [{ headline: "要約テキスト", description: "説明文。", url: null }],
       },
     ],
   };
-  await page.setContent(renderHtml(digestWithoutLink));
+  await page.setContent(renderHtml(digestWithoutIssueLink));
 
-  const heading = page.locator(".card h2").first();
-  await expect(heading).toHaveText("TLDR AI");
-  await expect(heading.locator("a")).toHaveCount(0);
+  const row = page.locator('.row[data-source="tldr"]');
+  await expect(row.locator("a.issue")).toHaveCount(0);
 });
 
 test("staleなソースは前回の内容と注記が表示される", async ({ page }) => {
@@ -84,27 +102,27 @@ test("staleなソースは前回の内容と注記が表示される", async ({ 
         source: "Android Weekly",
         title: "Android Weekly Issue #737",
         link: "https://androidweekly.net/issues/issue-737/",
-        summary: "* 前回時点の要約",
         generatedAt: "2026-07-29T00:00:00.000Z",
         stale: true,
+        entries: [{ headline: "前回時点の要約項目", description: "前回時点の説明文。", url: null }],
       },
     ],
   };
   await page.setContent(renderHtml(digestWithStale));
 
-  const card = page.locator(".card").first();
-  await expect(card.locator(".card-error")).toHaveCount(0);
-  await expect(card).toContainText("前回時点の要約");
-  await expect(card.locator(".stale-note")).toContainText("前回");
-  await expect(card.locator(".stale-note")).toContainText("の内容を表示中");
+  const row = page.locator('.row[data-source="android"]');
+  await expect(row.locator(".row.error")).toHaveCount(0);
+  await expect(row).toContainText("前回時点の要約項目");
+  await expect(row.locator(".stale")).toContainText("前回");
+  await expect(row.locator(".stale")).toContainText("を表示中");
 });
 
 test("通常のソースには最終更新日が表示される(週次/日次の混在が分かるように)", async ({ page }) => {
   await page.setContent(renderHtml(mockDigest));
 
-  const card = page.locator(".card").first();
-  await expect(card.locator(".updated-note")).toContainText("更新:");
-  await expect(card.locator(".stale-note")).toHaveCount(0);
+  const row = page.locator('.row[data-source="android"]').first();
+  await expect(row.locator(".row-head")).toContainText("8/3");
+  await expect(row.locator(".stale")).toHaveCount(0);
 });
 
 test("ダイジェスト未生成時は案内メッセージが表示される", async ({ page }) => {

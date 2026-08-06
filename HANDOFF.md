@@ -40,7 +40,12 @@ asa-mobile/
    - `mode: "single"`（Android Weekly, iOS Dev Weekly）: 週刊フィード。最新1件のみ使用し、
      本番cronでは**月曜のみ**取得する（`isWeeklyRefreshDay()`）。月曜以外はKVの前回値をそのまま維持
    - `mode: "multi"`（TLDR AI）: 日刊フィードなので直近5件を連結し、**毎日**取得・要約する
-3. 各ソースのcontentをGemini API（`gemini-3.6-flash`）に投げて日本語要約。429/5xxは指数バックオフで最大3回リトライ
+3. 各ソースのcontentをGemini API（`gemini-3.6-flash`）に投げ、`responseSchema`で構造化出力
+   （見出し＋説明文＋元記事URLの配列 `entries`）を強制して日本語要約。429/5xxは指数バックオフで
+   最大3回リトライ。週刊ソース(`mode: "single"`)は号のHTML本文から`extractLinkCandidates`で
+   リンク候補一覧を作り、Geminiにどの候補が生成トピックに対応するか(`candidateIndex`)を
+   選ばせる方式。日刊ソース(`mode: "multi"`)は1 RSS item = 1記事なのでリンクは
+   `extractLink(item)`で確定済みとし、Geminiにはリンク選択をさせない（ハルシネーション防止）
 4. 結果をJSON化して **Workers KV** に保存（`latest` キー + `history:YYYY-MM-DD` キーで履歴も保持）
 5. 取得・要約に失敗したソースは、KVに残っている前回成功分を `stale: true` 付きで代わりに表示する
    （前回分も無ければ従来通りエラー表示）。13時のリトライcronが失敗/staleソースだけを再試行する
@@ -58,7 +63,8 @@ Markdown太字変換、staleカード、リンク欠落時の防御、エラー�
 ## 既知の注意点・技術的負債
 
 - **TLDR AIのRSSは非公式ミラー**（`https://bullrich.dev/tldr-rss/ai.rss`）を使用。TLDR公式はメール配信のみでRSSを提供していないため。このミラーが停止・URL変更した場合は動かなくなる。代替手段の検討や死活監視は未実装。
-- RSS内のHTMLタグは正規表現で簡易除去しているだけ（`replace(/<[^>]+>/g, " ")`）。凝ったマークアップだと余計な空白やノイズが残る可能性あり。
+- RSS内のHTMLタグは正規表現で簡易除去しているだけ（`replace(/<[^>]+>/g, " ")`）。凝ったマークアップだと余計な空白やノイズが残る可能性あり。同様に `extractLinkCandidates` も `<a href="...">` を正規表現で拾うだけなので、凝ったマークアップでは候補漏れ・誤抽出が起こり得る。
+- 週刊ソースの記事リンクは Gemini が選んだ `candidateIndex` に依存する。プロンプトで「候補に無いURLを作り出さない」よう指示しているが、対応付けを誤る可能性はゼロではない（誤った記事にリンクする、または本来対応する記事があるのに `null` にする）。
 - KVの履歴（`history:*`）は書き込むだけで、読み出す/一覧表示するUIがまだない。日次cronになったことで書き込み頻度・件数も増えている（無期限保持、削除ロジックなし）。
 - HTMLは素朴な自前テンプレート。CSSフレームワークやビルドツールは使っていない。
 - Gemini無料枠はレート制限が低く、`/run` の連打（テスト目的でも）ですぐ429に達する。テスト時は連続実行しすぎないこと。
