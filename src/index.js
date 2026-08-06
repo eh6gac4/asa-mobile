@@ -122,6 +122,24 @@ function extractLink(item) {
 }
 
 /**
+ * itemの本文HTMLを選ぶ。description/content:encodedのどちらが本文を持つかは
+ * フィードによってまちまち（例: Android Weeklyはdescriptionが本文、iOS Dev Weeklyは
+ * descriptionが号のトピック一覧の短い要約文だけで、実際の本文とリンクはcontent:encoded
+ * 側にある）。単純に「descriptionが存在すればdescriptionを使う」(旧実装)だと、
+ * iOS Dev Weeklyのように存在はするが薄いdescriptionを誤って選んでしまい、
+ * extractLinkCandidatesがリンクを一つも拾えなくなる。文字数が長い方＝本文である
+ * 可能性が高いという単純なヒューリスティックで選ぶ。
+ */
+function pickBodyHtml(item) {
+  const description = item?.description;
+  const encoded = item?.["content:encoded"];
+  if (encoded && String(encoded).length > String(description ?? "").length) {
+    return encoded;
+  }
+  return description ?? encoded;
+}
+
+/**
  * 1フィード分のGemini入力を組み立てる。modeによってリンクの出所が異なるため
  * 経路を分ける（processFeedSource/summarizeEntries参照）。
  *
@@ -136,7 +154,7 @@ function extractLink(item) {
 function buildSourceContent(feed, items) {
   if (feed.mode === "single") {
     const picked = items.slice(0, 1);
-    const rawHtml = picked[0]?.description ?? picked[0]?.["content:encoded"];
+    const rawHtml = pickBodyHtml(picked[0]);
     return {
       mode: "single",
       combinedText: stripHtml(rawHtml),
@@ -150,7 +168,7 @@ function buildSourceContent(feed, items) {
     mode: "multi",
     multiItems: picked.map((item) => ({
       title: stripHtml(item.title),
-      description: stripHtml(item.description ?? item["content:encoded"]),
+      description: stripHtml(pickBodyHtml(item)),
       url: extractLink(item),
     })),
     latestLink: "",
