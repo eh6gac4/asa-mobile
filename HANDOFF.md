@@ -47,10 +47,17 @@ asa-mobile/
    リンク候補一覧を作り、Geminiにどの候補が生成トピックに対応するか(`candidateIndex`)を
    選ばせる方式。日刊ソース(`mode: "multi"`)は1 RSS item = 1記事なのでリンクは
    `extractLink(item)`で確定済みとし、Geminiにはリンク選択をさせない（ハルシネーション防止）
+   - 各`entries[]`要素は`{ headline, description, url, publishedAt }`。`publishedAt`は
+     RSSの`pubDate`をISO化したもので、`extractPubDate()`が抽出する。`mode: "single"`は
+     号単位でしか公開日が取れないため、その号の全entryに同じ値をコピーする
 4. 結果をJSON化して **Workers KV** に保存（`latest` キー + `history:YYYY-MM-DD` キーで履歴も保持）
 5. 取得・要約に失敗したソースは、KVに残っている前回成功分を `stale: true` 付きで代わりに表示する
    （前回分も無ければ従来通りエラー表示）。13時のリトライcronが失敗/staleソースだけを再試行する
-6. `fetch()` ハンドラがKVから `latest` を読んでHTMLとして描画・返却。各カードには最終更新日を表示
+6. `fetch()` ハンドラがKVから `latest` を読んでHTMLとして描画・返却。表示は「ソースごとのブロック」
+   ではなく、全ソースの全記事を`entry.publishedAt`（無ければ`item.generatedAt`にフォールバック）
+   の**降順でフラットに1本のフィード**として並べる（新しい記事が上）。エラーになったソースは
+   公開日を持たないためソート対象外とし、通常行の後ろにFEEDS順でまとめて表示する。
+   画面下部の`<footer class="sources">`に各ソース（`FEEDS[].siteUrl`）への公式サイトリンクを表示
 7. `/run` に POST すると全ソースを対象にcronを待たずに即時生成できる（テスト用）。
    `x-run-secret` ヘッダーが `env.RUN_SECRET` と一致しないと401（認証なしで公開すると
    誰でもGemini APIキーを消費できてしまうため）

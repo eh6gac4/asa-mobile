@@ -3,16 +3,20 @@ import { XMLParser } from "fast-xml-parser";
 // 取得するRSSフィード一覧。
 // mode: "single" -> 週刊フィード。最新1件のみ使用。cronはJST基準の月曜のみ取得する(isWeeklyRefreshDay参照)
 // mode: "multi"  -> 日刊フィード。直近5件を連結して1週間分として扱う。cronは毎日取得する
+// siteUrl: 画面下部の参照元フッターから貼るニュースレター本家サイトのURL。
+// TLDR AIのみ、取得(url)は非公式ミラーだがsiteUrlは本家(tldr.tech/ai)を指す。
 const FEEDS = [
   {
     name: "Android Weekly",
     url: "https://androidweekly.net/rss.xml",
     mode: "single",
+    siteUrl: "https://androidweekly.net/",
   },
   {
     name: "iOS Dev Weekly",
     url: "https://iosdevweekly.com/issues.rss",
     mode: "single",
+    siteUrl: "https://iosdevweekly.com/",
   },
   {
     name: "TLDR AI",
@@ -20,6 +24,7 @@ const FEEDS = [
     // ミラーが停止・URL変更した場合はここが動かなくなる（README/HANDOFF参照）。
     url: "https://bullrich.dev/tldr-rss/ai.rss",
     mode: "multi",
+    siteUrl: "https://tldr.tech/ai",
   },
 ];
 
@@ -129,6 +134,18 @@ function extractLink(item) {
 }
 
 /**
+ * itemのpubDateをISO文字列に変換する。パースできない/存在しない場合はnull。
+ * RSSの日付書式はRFC822形式とGMT表記が混在するが、Dateコンストラクタはどちらも解釈できる。
+ */
+function extractPubDate(item) {
+  const raw = item?.pubDate;
+  if (!raw) return null;
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+/**
  * itemの本文HTMLを選ぶ。description/content:encodedのどちらが本文を持つかは
  * フィードによってまちまち（例: Android Weeklyはdescriptionが本文、iOS Dev Weeklyは
  * descriptionが号のトピック一覧の短い要約文だけで、実際の本文とリンクはcontent:encoded
@@ -167,6 +184,9 @@ function buildSourceContent(feed, items) {
       combinedText: stripHtml(rawHtml),
       candidates: extractLinkCandidates(rawHtml),
       latestLink: extractLink(picked[0]),
+      // 号単位でしか公開日が取れないため、この号に属する全entryに同じ値をコピーする
+      // (processFeedSource参照)。
+      publishedAt: extractPubDate(picked[0]),
     };
   }
 
@@ -177,6 +197,7 @@ function buildSourceContent(feed, items) {
       title: stripHtml(item.title),
       description: stripHtml(pickBodyHtml(item)),
       url: extractLink(item),
+      publishedAt: extractPubDate(item),
     })),
     latestLink: "",
   };
@@ -314,16 +335,19 @@ async function processFeedSource(env, feed) {
       const description = String(raw?.description ?? "").trim();
 
       let url = null;
+      let publishedAt = null;
       if (built.mode === "single") {
         const candidateIndex = raw?.candidateIndex;
         if (Number.isInteger(candidateIndex) && built.candidates[candidateIndex]) {
           url = built.candidates[candidateIndex].url || null;
         }
+        publishedAt = built.publishedAt;
       } else {
         url = built.multiItems[index]?.url || null;
+        publishedAt = built.multiItems[index]?.publishedAt || null;
       }
 
-      return { headline, description, url };
+      return { headline, description, url, publishedAt };
     })
     .filter((entry) => entry.headline && entry.description);
 
@@ -478,14 +502,11 @@ function issueLabel(item) {
 }
 
 /**
- * 1ソース分(item)を、記事エントリごとの.row要素に展開する。
- * error/stale/通常の3状態と、entry.urlの有無による見出しのリンク/プレーンテキスト分岐がある。
+ * 取得失敗ソースを.row.error要素として描画する。
  */
-function renderItemRows(item) {
+function renderErrorRow(item) {
   const slug = sourceSlug(item.source);
-
-  if (item.error) {
-    return `
+  return `
       <div class="row error" data-source="${slug}">
         <span class="node"></span>
         <div class="row-head">
@@ -495,16 +516,27 @@ function renderItemRows(item) {
         <span class="headline">取得失敗</span>
         <p class="desc">${escapeHtml(item.error)}</p>
       </div>`;
-  }
+}
 
-  if (!item.entries || item.entries.length === 0) return "";
-
-  const dateLabel = item.generatedAt
-    ? new Date(item.generatedAt).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" })
+/**
+ * 1記事(entry)を.row要素として描画する。entry.urlの有無で見出しのリンク/
+ * プレーンテキストが分岐する。日付はentry.publishedAt(元記事/号の公開日)を使い、
+ * 無ければitem.generatedAt(要約日)にフォールバックする(旧スキーマのdigest互換)。
+ */
+function renderEntryRow(item, entry) {
+  const slug = sourceSlug(item.source);
+  const dateSource = entry.publishedAt ?? item.generatedAt;
+  const dateLabel = dateSource
+    ? new Date(dateSource).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" })
     : "";
   // stale: 最新取得に失敗し、KVに残っていた前回成功分を代わりに表示している。
+  // 日付欄は公開日を表示しつつ、注記には「いつ取得した分か」(生成日)を出す。
   const metaHtml = item.stale
-    ? `<span class="stale">・前回(${escapeHtml(dateLabel)})を表示中</span>`
+    ? `<span>・${escapeHtml(dateLabel)}</span><span class="stale">・前回取得(${escapeHtml(
+        item.generatedAt
+          ? new Date(item.generatedAt).toLocaleDateString("ja-JP", { timeZone: "Asia/Tokyo" })
+          : "",
+      )})分</span>`
     : dateLabel
       ? `<span>・${escapeHtml(dateLabel)}</span>`
       : "";
@@ -514,14 +546,12 @@ function renderItemRows(item) {
     ? `<a class="issue" href="${escapeHtml(item.link)}" target="_blank" rel="noopener">${escapeHtml(issueLabel(item))}</a>`
     : "";
 
-  return item.entries
-    .map((entry) => {
-      const headlineText = renderInlineMarkdown(escapeHtml(entry.headline));
-      const headlineHtml = entry.url
-        ? `<a class="headline" href="${escapeHtml(entry.url)}" target="_blank" rel="noopener">${headlineText}</a>`
-        : `<span class="headline">${headlineText}</span>`;
+  const headlineText = renderInlineMarkdown(escapeHtml(entry.headline));
+  const headlineHtml = entry.url
+    ? `<a class="headline" href="${escapeHtml(entry.url)}" target="_blank" rel="noopener">${headlineText}</a>`
+    : `<span class="headline">${headlineText}</span>`;
 
-      return `
+  return `
       <div class="row" data-source="${slug}">
         <span class="node"></span>
         <div class="row-head">
@@ -532,8 +562,6 @@ function renderItemRows(item) {
         ${headlineHtml}
         <p class="desc">${renderInlineMarkdown(escapeHtml(entry.description))}</p>
       </div>`;
-    })
-    .join("\n");
 }
 
 export function renderHtml(digest) {
@@ -541,14 +569,36 @@ export function renderHtml(digest) {
     ? new Date(digest.generatedAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })
     : null;
 
-  const legendHtml = FEEDS.map(
+  const footerHtml = FEEDS.map(
     (feed) =>
-      `<span class="item"><span class="dot ${sourceSlug(feed.name)}"></span>${escapeHtml(feed.name)}</span>`,
+      `<a href="${escapeHtml(feed.siteUrl)}" target="_blank" rel="noopener"><span class="dot ${sourceSlug(feed.name)}"></span>${escapeHtml(feed.name)}</a>`,
   ).join("\n          ");
 
-  const body = digest
-    ? `<div class="feed">${digest.items.map((item) => renderItemRows(item)).join("\n")}</div>`
-    : `<div class="empty-line">まだダイジェストが生成されていません。<code>POST /run</code> で手動実行するか、次回のcron発火を待ってください。</div>`;
+  let body;
+  if (!digest) {
+    body = `<div class="empty-line">まだダイジェストが生成されていません。<code>POST /run</code> で手動実行するか、次回のcron発火を待ってください。</div>`;
+  } else {
+    // 記事は「ソースごとのブロック」ではなく、公開日降順のフラットな1本のフィードにする
+    // (新しい記事が上に来るように)。エラーitemは公開日を持たないためソート対象外とし、
+    // 通常行の後ろにFEEDS順のまままとめて描画する。
+    const rows = [];
+    const errorItems = [];
+    for (const item of digest.items) {
+      if (item.error) {
+        errorItems.push(item);
+        continue;
+      }
+      for (const entry of item.entries ?? []) {
+        const sortKey = entry.publishedAt ?? item.generatedAt ?? digest.generatedAt;
+        rows.push({ item, entry, sortKey });
+      }
+    }
+    rows.sort((a, b) => new Date(b.sortKey) - new Date(a.sortKey));
+
+    const rowsHtml = rows.map(({ item, entry }) => renderEntryRow(item, entry)).join("\n");
+    const errorRowsHtml = errorItems.map((item) => renderErrorRow(item)).join("\n");
+    body = `<div class="feed">${rowsHtml}${errorRowsHtml}</div>`;
+  }
 
   return `<!DOCTYPE html>
 <html lang="ja">
@@ -583,20 +633,24 @@ export function renderHtml(digest) {
 
   .page { max-width: 620px; margin: 0 auto; padding: 32px clamp(16px, 5vw, 22px) 90px; }
 
-  header.top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+  header.top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 28px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+  @media (prefers-color-scheme: dark) { header.top { border-bottom-color: var(--line-dark); } }
   header.top h1 { font-family: "Sora", -apple-system, sans-serif; font-size: clamp(16px, 4.4vw, 18px); font-weight: 700; margin: 0; white-space: nowrap; }
   header.top h1::before { content: "📱 "; }
   header.top .ts { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: var(--soft); white-space: nowrap; }
   @media (prefers-color-scheme: dark) { header.top .ts { color: var(--soft-dark); } }
 
-  .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 16px 0 28px; padding-bottom: 20px; border-bottom: 1px solid var(--line); font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--soft); }
-  @media (prefers-color-scheme: dark) { .legend { border-bottom-color: var(--line-dark); color: var(--soft-dark); } }
-  .legend .item { display: flex; align-items: center; gap: 6px; }
-  .legend .dot { width: 7px; height: 7px; border-radius: 999px; flex: none; }
-  .legend .dot.android { background: var(--accent-android); }
-  .legend .dot.ios { background: var(--accent-ios); }
-  .legend .dot.tldr { background: var(--accent-tldr); }
-  .legend .dot.other { background: var(--accent-other); }
+  .sources { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line); font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--soft); }
+  @media (prefers-color-scheme: dark) { .sources { border-top-color: var(--line-dark); color: var(--soft-dark); } }
+  .sources .label { color: var(--soft); }
+  @media (prefers-color-scheme: dark) { .sources .label { color: var(--soft-dark); } }
+  .sources a { display: flex; align-items: center; gap: 6px; }
+  .sources a:hover { text-decoration: underline; }
+  .sources .dot { width: 7px; height: 7px; border-radius: 999px; flex: none; }
+  .sources .dot.android { background: var(--accent-android); }
+  .sources .dot.ios { background: var(--accent-ios); }
+  .sources .dot.tldr { background: var(--accent-tldr); }
+  .sources .dot.other { background: var(--accent-other); }
 
   .feed { position: relative; padding-left: 20px; }
   .feed::before { content: ""; position: absolute; left: 4px; top: 8px; bottom: 8px; width: 1px; background: var(--line); }
@@ -644,10 +698,11 @@ export function renderHtml(digest) {
   <h1>朝刊モバイル</h1>
   ${generatedAtLabel ? `<span class="ts">${escapeHtml(generatedAtLabel)}</span>` : ""}
 </header>
-<div class="legend">
-  ${legendHtml}
-</div>
 ${body}
+<footer class="sources">
+  <span class="label">参照元</span>
+  ${footerHtml}
+</footer>
 </div>
 </body>
 </html>`;
