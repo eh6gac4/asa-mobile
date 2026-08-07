@@ -33,6 +33,20 @@ const MULTI_ITEM_LIMIT = 5;
 const MAX_LINK_CANDIDATES = 40;
 const GEMINI_MODEL = "gemini-3.6-flash";
 
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+/**
+ * 日時(ISO文字列/エポックミリ秒/Date、`new Date()`が解釈できるもの)をJST基準の
+ * 暦日 "YYYY-MM-DD" に変換する。
+ * 本番cronは20:00 UTCに発火するため、UTCの暦日をそのまま使うと号の日付が
+ * 常に1日前になる。号のキー・URL・曜日ラベルはすべてJST基準で揃える。
+ */
+export function jstDateKey(dateLike) {
+  return new Date(new Date(dateLike).getTime() + JST_OFFSET_MS)
+    .toISOString()
+    .slice(0, 10);
+}
+
 // Gemini APIの一時エラー(高負荷時の503等)向けリトライ設定。
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
@@ -503,9 +517,11 @@ export function buildEdition(digest, seenMap, dateKey) {
  * digestをKVへ保存する。従来の「latest」「history:」に加えて、その日の新着分だけを
  * 「edition:」として保存し、発行日一覧(editions)と既出URL台帳(seen:urls)を更新する。
  * generateDigest/retryFailedSourcesの両方から呼ぶ(旧実装ではこの3行が2箇所に重複していた)。
+ * dateKeyはJST基準の暦日(jstDateKey参照)。本番cronは20:00 UTC=翌5:00 JSTに発火するため、
+ * UTCの暦日をそのまま使うと号の日付が1日ズレる。
  */
 async function persistDigest(env, digest) {
-  const dateKey = digest.generatedAt.slice(0, 10); // YYYY-MM-DD
+  const dateKey = jstDateKey(digest.generatedAt);
 
   await env.DIGEST_KV.put("latest", JSON.stringify(digest));
   await env.DIGEST_KV.put(`history:${dateKey}`, JSON.stringify(digest));
@@ -535,9 +551,7 @@ async function persistDigest(env, digest) {
       seenMap[entryKey(item, entry)] = dateKey;
     }
   }
-  const cutoff = new Date(Date.now() - SEEN_TTL_DAYS * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
+  const cutoff = jstDateKey(Date.now() - SEEN_TTL_DAYS * 24 * 60 * 60 * 1000);
   for (const key of Object.keys(seenMap)) {
     if (seenMap[key] < cutoff) delete seenMap[key];
   }
@@ -914,8 +928,6 @@ export function renderNotFoundHtml(date) {
 // リトライ用cron ("0 0 * * *" = 9:00 JST、本番cronの4時間後、毎日)。この文字列は
 // wrangler.tomlの [triggers].crons と一致させること。
 const RETRY_CRON = "0 0 * * *";
-
-const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
 /**
  * mode: "single" の週次ソース(Android Weekly / iOS Dev Weekly)を取得してよい日か。

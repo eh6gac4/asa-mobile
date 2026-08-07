@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { renderHtml, renderArchiveHtml, buildEdition } from "../src/index.js";
+import { renderHtml, renderArchiveHtml, buildEdition, jstDateKey } from "../src/index.js";
 
 const mockDigest = {
   generatedAt: "2026-08-05T00:00:00.000Z",
@@ -278,6 +278,24 @@ test.describe("buildEdition", () => {
     const edition = buildEdition(digest, seenMap, "2026-08-07");
 
     expect(edition.items.some((item) => item.error)).toBe(true);
+  });
+});
+
+test.describe("jstDateKey", () => {
+  test("本番cron発火時刻(20:00 UTC)はJST上の翌日として扱われる", () => {
+    expect(jstDateKey("2026-08-07T20:00:38.068Z")).toBe("2026-08-08");
+  });
+
+  test("リトライcron発火時刻(0:00 UTC)は本番cronと同じ日付に着地する", () => {
+    expect(jstDateKey("2026-08-08T00:00:00.000Z")).toBe("2026-08-08");
+  });
+
+  test("JST日付境界の直前はまだ前日", () => {
+    expect(jstDateKey("2026-08-07T14:59:59.999Z")).toBe("2026-08-07");
+  });
+
+  test("JST日付境界ちょうどで日付が繰り上がる", () => {
+    expect(jstDateKey("2026-08-07T15:00:00.000Z")).toBe("2026-08-08");
   });
 });
 
