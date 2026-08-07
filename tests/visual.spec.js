@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { renderHtml } from "../src/index.js";
+import { renderHtml, renderArchiveHtml, buildEdition } from "../src/index.js";
 
 const mockDigest = {
   generatedAt: "2026-08-05T00:00:00.000Z",
@@ -212,4 +212,130 @@ test("ダイジェスト未生成時は案内メッセージが表示される",
 test("見た目のスクリーンショットを撮る", async ({ page }) => {
   await page.setContent(renderHtml(mockDigest));
   await page.screenshot({ path: "tests/__screenshots__/digest.png", fullPage: true });
+});
+
+test.describe("buildEdition", () => {
+  const digest = {
+    generatedAt: "2026-08-07T00:00:00.000Z",
+    items: [
+      {
+        source: "TLDR AI",
+        title: "",
+        link: "",
+        generatedAt: "2026-08-07T00:00:00.000Z",
+        entries: [
+          { headline: "新着記事", description: "説明。", url: "https://example.com/new", publishedAt: "2026-08-07T00:00:00.000Z" },
+          { headline: "既出記事", description: "説明。", url: "https://example.com/old", publishedAt: "2026-08-01T00:00:00.000Z" },
+        ],
+      },
+      {
+        source: "iOS Dev Weekly",
+        error: "RSS取得失敗",
+      },
+    ],
+  };
+
+  test("既出URLのentryは除外され、未出のentryだけが残る", () => {
+    const seenMap = { "https://example.com/old": "2026-08-01" };
+    const edition = buildEdition(digest, seenMap, "2026-08-07");
+
+    const tldr = edition.items.find((item) => item.source === "TLDR AI");
+    expect(tldr.entries).toHaveLength(1);
+    expect(tldr.entries[0].url).toBe("https://example.com/new");
+  });
+
+  test("当日分として記録済みのentryはリトライ再実行でも除外されない(冪等性)", () => {
+    // 同日中にリトライcronが再実行されるケースを模す:
+    // 1回目のpersistDigestで自分自身が既に seenMap[url] = 当日 を記録している状態。
+    const seenMap = { "https://example.com/new": "2026-08-07", "https://example.com/old": "2026-08-01" };
+    const edition = buildEdition(digest, seenMap, "2026-08-07");
+
+    const tldr = edition.items.find((item) => item.source === "TLDR AI");
+    expect(tldr.entries).toHaveLength(1);
+    expect(tldr.entries[0].url).toBe("https://example.com/new");
+  });
+
+  test("urlがnullのentryはsource+headlineをキーに既出判定される", () => {
+    const digestWithNullUrl = {
+      generatedAt: "2026-08-07T00:00:00.000Z",
+      items: [
+        {
+          source: "Android Weekly",
+          title: "Android Weekly Issue #700",
+          link: "",
+          entries: [{ headline: "見出しのみ", description: "説明。", url: null, publishedAt: "2026-08-07T00:00:00.000Z" }],
+        },
+      ],
+    };
+    const seenMap = { "Android Weekly::見出しのみ": "2026-08-01" };
+    const edition = buildEdition(digestWithNullUrl, seenMap, "2026-08-07");
+
+    expect(edition.items).toHaveLength(0);
+  });
+
+  test("error itemはentryを持たなくてもそのまま号に含まれる", () => {
+    const seenMap = { "https://example.com/new": "2026-08-01", "https://example.com/old": "2026-08-01" };
+    const edition = buildEdition(digest, seenMap, "2026-08-07");
+
+    expect(edition.items.some((item) => item.error)).toBe(true);
+  });
+});
+
+test.describe("前後ナビ", () => {
+  const editionDigest = {
+    date: "2026-08-07",
+    generatedAt: "2026-08-07T00:00:00.000Z",
+    items: [
+      {
+        source: "TLDR AI",
+        title: "",
+        link: "",
+        generatedAt: "2026-08-07T00:00:00.000Z",
+        entries: [{ headline: "本日の記事", description: "説明。", url: "https://example.com/a", publishedAt: "2026-08-07T00:00:00.000Z" }],
+      },
+    ],
+  };
+
+  test("前号/次号どちらもある場合は両方のリンクが表示される", async ({ page }) => {
+    const nav = { date: "2026-08-07", prevDate: "2026-08-06", nextDate: "2026-08-08", isLatest: false };
+    await page.setContent(renderHtml(editionDigest, nav));
+
+    const navEl = page.locator("nav.nav");
+    await expect(navEl.locator('a[href="/2026-08-06"]')).toHaveCount(1);
+    await expect(navEl.locator('a[href="/2026-08-08"]')).toHaveCount(1);
+    await expect(navEl.locator('a[href="/archive"]')).toHaveCount(1);
+  });
+
+  test("最新号(次号なし)ではnextのリンクが無効表示になる", async ({ page }) => {
+    const nav = { date: "2026-08-07", prevDate: "2026-08-06", nextDate: null, isLatest: true };
+    await page.setContent(renderHtml(editionDigest, nav));
+
+    const navEl = page.locator("nav.nav");
+    await expect(navEl.locator('a[href="/2026-08-06"]')).toHaveCount(1);
+    await expect(navEl.locator("span.disabled")).toHaveCount(1);
+  });
+
+  test("日付の見出しラベルが表示される", async ({ page }) => {
+    const nav = { date: "2026-08-07", prevDate: null, nextDate: null, isLatest: true };
+    await page.setContent(renderHtml(editionDigest, nav));
+
+    await expect(page.locator("header.top .ts")).toContainText("2026-08-07");
+  });
+});
+
+test("バックナンバー一覧は年月ごとにグルーピングされ、新しい日付から並ぶ", async ({ page }) => {
+  await page.setContent(renderArchiveHtml(["2026-08-07", "2026-08-03", "2026-07-31"]));
+
+  const groups = page.locator(".archive-group");
+  await expect(groups).toHaveCount(2);
+  await expect(groups.nth(0)).toContainText("2026年8月");
+  await expect(groups.nth(0).locator("a")).toHaveCount(2);
+  await expect(groups.nth(1)).toContainText("2026年7月");
+  await expect(page.locator('a[href="/2026-08-07"]')).toHaveCount(1);
+});
+
+test("バックナンバーが無い場合は案内メッセージが表示される", async ({ page }) => {
+  await page.setContent(renderArchiveHtml([]));
+
+  await expect(page.locator("body")).toContainText("まだ号がありません");
 });

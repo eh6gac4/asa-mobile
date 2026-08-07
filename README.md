@@ -66,7 +66,22 @@ curl -X POST https://<デプロイ先のURL>/run -H "x-run-secret: <RUN_SECRET�
 - 3ソース(Android Weekly / iOS Dev Weekly / TLDR AI)とも要約が生成されるか
 - Gemini APIのレスポンス形式が変わっていないか(`data.candidates[0].content.parts[0].text` の構造に依存)
 
-デプロイ先のトップページ (`GET /`) にアクセスすると、最新のダイジェストがHTMLで表示される。
+デプロイ先のトップページ (`GET /`) にアクセスすると、最新号がHTMLで表示される。
+
+## URL構成
+
+朝刊らしく、日付ごとにユニークなURLを持つ「号」として過去に遡れる。
+
+| パス | 内容 |
+|---|---|
+| `GET /` | 最新号 |
+| `GET /YYYY-MM-DD` | その日の号。前号/次号への導線つき |
+| `GET /archive` | 発行日一覧(年月ごとにグルーピング) |
+
+1つの号に載るのは「その日の新着分だけ」。Android Weekly / iOS Dev Weeklyは月曜しか更新
+されないため、KVの`history:`スナップショットをそのまま出すと同じ記事が何日も並んでしまう。
+既出URLを`seen:urls`に記録し、まだ載せていない記事だけを`edition:YYYY-MM-DD`として保存する
+仕組みになっている(詳細はHANDOFF.md参照)。
 
 ## ローカル開発
 
