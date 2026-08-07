@@ -1,5 +1,12 @@
 import { test, expect } from "@playwright/test";
-import { renderHtml, renderArchiveHtml, buildEdition, jstDateKey } from "../src/index.js";
+import {
+  renderHtml,
+  renderArchiveHtml,
+  buildEdition,
+  jstDateKey,
+  unwrapTrackingUrl,
+  extractLinkCandidates,
+} from "../src/index.js";
 
 const mockDigest = {
   generatedAt: "2026-08-05T00:00:00.000Z",
@@ -296,6 +303,51 @@ test.describe("jstDateKey", () => {
 
   test("JST日付境界ちょうどで日付が繰り上がる", () => {
     expect(jstDateKey("2026-08-07T15:00:00.000Z")).toBe("2026-08-08");
+  });
+});
+
+test.describe("unwrapTrackingUrl", () => {
+  test("TLDRのトラッキングリンクからpercent-encodeされた元URLを復元する", () => {
+    const wrapped =
+      "https://tracking.tldrnewsletter.com/CL0/https%3A%2F%2Fexample.com%2Farticle%3Futm_source%3Dtldrai/1/0102030405060708090a0b0c0d0e0f10";
+    expect(unwrapTrackingUrl(wrapped)).toBe("https://example.com/article?utm_source=tldrai");
+  });
+
+  test("ラップされていない素のURLはそのまま返す", () => {
+    expect(unwrapTrackingUrl("https://example.com/article")).toBe("https://example.com/article");
+  });
+
+  test("元URLを取り出せない場合はラップされたURLをそのまま返す", () => {
+    const noEmbeddedUrl = "https://tracking.tldrnewsletter.com/CL0/not-a-url/1/hash";
+    expect(unwrapTrackingUrl(noEmbeddedUrl)).toBe(noEmbeddedUrl);
+  });
+
+  test("null/undefinedは空文字として扱う", () => {
+    expect(unwrapTrackingUrl(null)).toBe("");
+    expect(unwrapTrackingUrl(undefined)).toBe("");
+  });
+});
+
+test.describe("extractLinkCandidates", () => {
+  test("unsubscribe等のメールフッタ由来のノイズリンクは候補から除外される", () => {
+    const html = `
+      <a href="https://example.com/article">興味深い記事のタイトル</a>
+      <a href="https://tldr.tech/unsubscribe">unsubscribe</a>
+      <a href="https://tldr.tech/preferences">Manage your subscriptions</a>
+      <a href="https://tldr.tech/advertise">Advertise with us</a>
+    `;
+    const candidates = extractLinkCandidates(html);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].url).toBe("https://example.com/article");
+  });
+
+  test("limit引数で候補数の上限を変えられる", () => {
+    const html = Array.from(
+      { length: 5 },
+      (_, i) => `<a href="https://example.com/${i}">記事${i}</a>`,
+    ).join("\n");
+    expect(extractLinkCandidates(html, 3)).toHaveLength(3);
+    expect(extractLinkCandidates(html, 10)).toHaveLength(5);
   });
 });
 

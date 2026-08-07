@@ -10,10 +10,11 @@
     "test:visual": "playwright test"
   },
   "dependencies": {
-    "fast-xml-parser": "^4.5.0"
+    "fast-xml-parser": "^4.5.0",
+    "postal-mime": "^2.7.6"
   },
   "devDependencies": {
-    "wrangler": "^4.118.0",
-    "@playwright/test": "^1.62.1"
+    "@playwright/test": "^1.62.1",
+    "wrangler": "^4.118.0"
   }
 }
