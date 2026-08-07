@@ -410,10 +410,7 @@ async function generateDigest(env, feedsToProcess = FEEDS) {
   }
 
   const digest = { generatedAt: nowISO, items: results };
-
-  const dateKey = digest.generatedAt.slice(0, 10); // YYYY-MM-DD
-  await env.DIGEST_KV.put("latest", JSON.stringify(digest));
-  await env.DIGEST_KV.put(`history:${dateKey}`, JSON.stringify(digest));
+  await persistDigest(env, digest);
 
   return digest;
 }
@@ -456,11 +453,95 @@ async function retryFailedSources(env) {
   }
 
   const digestOut = { generatedAt: nowISO, items: updatedItems };
-  const dateKey = digestOut.generatedAt.slice(0, 10);
-  await env.DIGEST_KV.put("latest", JSON.stringify(digestOut));
-  await env.DIGEST_KV.put(`history:${dateKey}`, JSON.stringify(digestOut));
+  await persistDigest(env, digestOut);
 
   return digestOut;
+}
+
+// seen:urls に記録した既出URLをいつまで保持するか。これより古い記録は
+// persistDigest内で剪定する(KVを無限に肥大化させないため)。
+const SEEN_TTL_DAYS = 90;
+
+/**
+ * entry(または取得失敗item)を一意に識別するキー。entry.urlがあればそれを使うが、
+ * 単一号内リンク(single mode)でGeminiがcandidateIndexを対応付けられなかった場合など
+ * url: nullのentryも存在するため、その場合は source+headline を代替キーにする。
+ */
+function entryKey(item, entry) {
+  return entry.url || `${item.source}::${entry.headline}`;
+}
+
+/**
+ * digestから「その日の新着分」だけを抜き出した号(edition)を組み立てる。
+ * Android Weekly / iOS Dev Weekly は月曜しか号が更新されないため、historyの
+ * スナップショットをそのまま出すと火〜日に同じ記事が並び続けてしまう。
+ * 既出URL台帳(seenMap)と突き合わせて、まだ載せていない分だけを残す。
+ *
+ * seenMap[key] === dateKey (=当日) のentryは既出扱いにしない。リトライcronが
+ * 同日中に再実行されても、自分が先に記録した分で紙面が空にならないようにするため
+ * (冪等性)。
+ */
+export function buildEdition(digest, seenMap, dateKey) {
+  const items = [];
+  for (const item of digest.items) {
+    if (item.error) {
+      items.push(item);
+      continue;
+    }
+    const entries = (item.entries ?? []).filter((entry) => {
+      const seenDate = seenMap[entryKey(item, entry)];
+      return !seenDate || seenDate === dateKey;
+    });
+    if (entries.length > 0) {
+      items.push({ ...item, entries });
+    }
+  }
+  return { date: dateKey, generatedAt: digest.generatedAt, items };
+}
+
+/**
+ * digestをKVへ保存する。従来の「latest」「history:」に加えて、その日の新着分だけを
+ * 「edition:」として保存し、発行日一覧(editions)と既出URL台帳(seen:urls)を更新する。
+ * generateDigest/retryFailedSourcesの両方から呼ぶ(旧実装ではこの3行が2箇所に重複していた)。
+ */
+async function persistDigest(env, digest) {
+  const dateKey = digest.generatedAt.slice(0, 10); // YYYY-MM-DD
+
+  await env.DIGEST_KV.put("latest", JSON.stringify(digest));
+  await env.DIGEST_KV.put(`history:${dateKey}`, JSON.stringify(digest));
+
+  const seenRaw = await env.DIGEST_KV.get("seen:urls");
+  const seenMap = seenRaw ? JSON.parse(seenRaw) : {};
+
+  const edition = buildEdition(digest, seenMap, dateKey);
+  if (edition.items.length === 0) {
+    // その日の新着が無い(週刊ソースの非月曜など)。号は作らない。
+    return;
+  }
+
+  await env.DIGEST_KV.put(`edition:${dateKey}`, JSON.stringify(edition));
+
+  const editionsRaw = await env.DIGEST_KV.get("editions");
+  const editions = editionsRaw ? JSON.parse(editionsRaw) : [];
+  if (!editions.includes(dateKey)) {
+    editions.push(dateKey);
+    editions.sort((a, b) => (a < b ? 1 : -1)); // 降順(新しい日付が先頭)
+    await env.DIGEST_KV.put("editions", JSON.stringify(editions));
+  }
+
+  for (const item of edition.items) {
+    if (item.error) continue;
+    for (const entry of item.entries) {
+      seenMap[entryKey(item, entry)] = dateKey;
+    }
+  }
+  const cutoff = new Date(Date.now() - SEEN_TTL_DAYS * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+  for (const key of Object.keys(seenMap)) {
+    if (seenMap[key] < cutoff) delete seenMap[key];
+  }
+  await env.DIGEST_KV.put("seen:urls", JSON.stringify(seenMap));
 }
 
 function escapeHtml(str) {
@@ -564,15 +645,86 @@ function renderEntryRow(item, entry) {
       </div>`;
 }
 
-export function renderHtml(digest) {
-  const generatedAtLabel = digest
-    ? new Date(digest.generatedAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })
-    : null;
+const WEEKDAY_JA = ["日", "月", "火", "水", "木", "金", "土"];
 
+// "2026-08-07" -> "2026-08-07 (金)"。edition.dateはJST基準の暦日文字列なので、
+// タイムゾーンのズレを避けるためJST正午固定でDateを作ってgetDay()する。
+function formatDateLabel(dateKey) {
+  const d = new Date(`${dateKey}T12:00:00+09:00`);
+  return `${dateKey} (${WEEKDAY_JA[d.getDay()]})`;
+}
+
+// ナビゲーション用の短縮表記。"2026-08-07" -> "8/7"
+function formatShortDate(dateKey) {
+  const [, month, day] = dateKey.split("-");
+  return `${Number(month)}/${Number(day)}`;
+}
+
+function renderSourcesFooter() {
   const footerHtml = FEEDS.map(
     (feed) =>
       `<a href="${escapeHtml(feed.siteUrl)}" target="_blank" rel="noopener"><span class="dot ${sourceSlug(feed.name)}"></span>${escapeHtml(feed.name)}</a>`,
   ).join("\n          ");
+  return `
+<footer class="sources">
+  <span class="label">参照元</span>
+  ${footerHtml}
+</footer>`;
+}
+
+/**
+ * 号ページの前号/次号ナビ。editionsは新しい日付が先頭の降順配列なので、
+ * prevDate(過去へ)はindex+1、nextDate(未来へ)はindex-1側になる(呼び出し元で算出)。
+ * 端では該当リンクの代わりに無効表示にする。
+ */
+function renderNav(nav) {
+  if (!nav) return "";
+  const prevHtml = nav.prevDate
+    ? `<a href="/${nav.prevDate}">← ${escapeHtml(formatShortDate(nav.prevDate))}</a>`
+    : `<span class="disabled">←</span>`;
+  const nextHtml = nav.nextDate
+    ? `<a href="/${nav.nextDate}">${escapeHtml(formatShortDate(nav.nextDate))} →</a>`
+    : `<span class="disabled">→</span>`;
+  return `
+<nav class="nav">
+  ${prevHtml}
+  <a class="spacer" href="/archive">バックナンバー</a>
+  ${nextHtml}
+</nav>`;
+}
+
+// 全ページ共通のHTMLシェル(head/CSS/header/footer)。ヘッダー右側とbody中身だけ
+// ページごとに差し替える。
+function renderShell({ headerRight, body }) {
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>朝刊モバイル</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>${PAGE_STYLES}</style>
+</head>
+<body>
+<div class="page">
+<header class="top">
+  <h1>朝刊モバイル</h1>
+  ${headerRight ?? ""}
+</header>
+${body}
+</div>
+</body>
+</html>`;
+}
+
+export function renderHtml(digest, nav) {
+  const generatedAtLabel = nav
+    ? formatDateLabel(nav.date)
+    : digest
+      ? new Date(digest.generatedAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })
+      : null;
 
   let body;
   if (!digest) {
@@ -600,16 +752,17 @@ export function renderHtml(digest) {
     body = `<div class="feed">${rowsHtml}${errorRowsHtml}</div>`;
   }
 
-  return `<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>朝刊モバイル</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>
+  const headerRight = generatedAtLabel
+    ? `<span class="ts">${escapeHtml(generatedAtLabel)}</span>`
+    : "";
+
+  return renderShell({
+    headerRight,
+    body: `${body}${renderNav(nav)}${renderSourcesFooter()}`,
+  });
+}
+
+const PAGE_STYLES = `
   :root {
     --bg: oklch(99% 0.004 95);
     --bg-dark: oklch(15% 0.008 95);
@@ -690,22 +843,72 @@ export function renderHtml(digest) {
   @media (prefers-color-scheme: dark) { .empty-line { color: var(--soft-dark); border-color: var(--line-dark); } }
   .empty-line code { color: var(--ink); background: var(--line); border-radius: 3px; padding: 1px 5px; }
   @media (prefers-color-scheme: dark) { .empty-line code { color: var(--ink-dark); background: var(--line-dark); } }
-</style>
-</head>
-<body>
-<div class="page">
-<header class="top">
-  <h1>朝刊モバイル</h1>
-  ${generatedAtLabel ? `<span class="ts">${escapeHtml(generatedAtLabel)}</span>` : ""}
-</header>
-${body}
-<footer class="sources">
-  <span class="label">参照元</span>
-  ${footerHtml}
-</footer>
-</div>
-</body>
-</html>`;
+  .empty-line a { color: var(--ink); text-decoration: underline; }
+  @media (prefers-color-scheme: dark) { .empty-line a { color: var(--ink-dark); } }
+
+  .nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line); font-family: "JetBrains Mono", monospace; font-size: 12px; }
+  @media (prefers-color-scheme: dark) { .nav { border-top-color: var(--line-dark); } }
+  .nav a { color: var(--soft); }
+  @media (prefers-color-scheme: dark) { .nav a { color: var(--soft-dark); } }
+  .nav a:hover { text-decoration: underline; }
+  .nav .disabled { color: var(--line); }
+  @media (prefers-color-scheme: dark) { .nav .disabled { color: var(--line-dark); } }
+
+  .archive-group { margin-bottom: 24px; }
+  .archive-group h2 { font-family: "JetBrains Mono", monospace; font-size: 12px; font-weight: 600; color: var(--soft); margin: 0 0 10px; }
+  @media (prefers-color-scheme: dark) { .archive-group h2 { color: var(--soft-dark); } }
+  .archive-group ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .archive-group a { font-size: 14px; padding: 4px 0; }
+  .archive-group a:hover { text-decoration: underline; }
+`;
+
+/**
+ * 発行日一覧ページ("/archive")。年月ごとにグルーピングして新しい順に並べる。
+ */
+export function renderArchiveHtml(editions) {
+  let body;
+  if (editions.length === 0) {
+    body = `<div class="empty-line">まだ号がありません。</div>`;
+  } else {
+    const groups = new Map();
+    for (const date of editions) {
+      const yearMonth = date.slice(0, 7); // YYYY-MM
+      if (!groups.has(yearMonth)) groups.set(yearMonth, []);
+      groups.get(yearMonth).push(date);
+    }
+
+    body = [...groups.entries()]
+      .map(([yearMonth, dates]) => {
+        const [year, month] = yearMonth.split("-");
+        const itemsHtml = dates
+          .map((date) => `<li><a href="/${date}">${escapeHtml(formatDateLabel(date))}</a></li>`)
+          .join("\n          ");
+        return `
+      <div class="archive-group">
+        <h2>${Number(year)}年${Number(month)}月</h2>
+        <ul>
+          ${itemsHtml}
+        </ul>
+      </div>`;
+      })
+      .join("\n");
+  }
+
+  return renderShell({
+    headerRight: `<span class="ts">バックナンバー</span>`,
+    body: `${body}${renderSourcesFooter()}`,
+  });
+}
+
+/**
+ * 指定日の号がまだ無い/存在しない場合の404ページ。
+ */
+export function renderNotFoundHtml(date) {
+  const body = `<div class="empty-line">${escapeHtml(date)} の号は見つかりませんでした。<a href="/archive">バックナンバー一覧</a>から探してください。</div>`;
+  return renderShell({
+    headerRight: "",
+    body: `${body}${renderSourcesFooter()}`,
+  });
 }
 
 // リトライ用cron ("0 0 * * *" = 9:00 JST、本番cronの4時間後、毎日)。この文字列は
@@ -726,6 +929,34 @@ const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 function isWeeklyRefreshDay(scheduledTime) {
   const jst = new Date(new Date(scheduledTime).getTime() + JST_OFFSET_MS);
   return jst.getUTCDay() === 1; // 1 = Monday (JST基準)
+}
+
+const HTML_HEADERS = { "Content-Type": "text/html; charset=utf-8" };
+
+/**
+ * 号ページ("/"または"/YYYY-MM-DD")のレスポンスを組み立てる。
+ * editions(新しい日付が先頭の降順配列)上でのdateの位置から前号/次号を求める。
+ * 該当日のeditionが無ければ404ページを返す。
+ */
+async function respondWithEdition(env, editions, date) {
+  const index = editions.indexOf(date);
+  if (index === -1) {
+    return new Response(renderNotFoundHtml(date), { status: 404, headers: HTML_HEADERS });
+  }
+
+  const raw = await env.DIGEST_KV.get(`edition:${date}`);
+  const edition = raw ? JSON.parse(raw) : null;
+  if (!edition) {
+    return new Response(renderNotFoundHtml(date), { status: 404, headers: HTML_HEADERS });
+  }
+
+  const nav = {
+    date,
+    prevDate: editions[index + 1] ?? null, // 降順配列なので次のindexは過去日
+    nextDate: index > 0 ? editions[index - 1] : null,
+    isLatest: index === 0,
+  };
+  return new Response(renderHtml(edition, nav), { headers: HTML_HEADERS });
 }
 
 export default {
@@ -755,10 +986,34 @@ export default {
       });
     }
 
-    const raw = await env.DIGEST_KV.get("latest");
-    const digest = raw ? JSON.parse(raw) : null;
-    return new Response(renderHtml(digest), {
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
+    if (request.method !== "GET") {
+      return new Response("Not Found", { status: 404 });
+    }
+
+    if (url.pathname === "/archive") {
+      const editionsRaw = await env.DIGEST_KV.get("editions");
+      const editions = editionsRaw ? JSON.parse(editionsRaw) : [];
+      return new Response(renderArchiveHtml(editions), { headers: HTML_HEADERS });
+    }
+
+    const editionsRaw = await env.DIGEST_KV.get("editions");
+    const editions = editionsRaw ? JSON.parse(editionsRaw) : [];
+
+    if (url.pathname === "/") {
+      if (editions.length === 0) {
+        // 移行期フォールバック: editionがまだ1件も無い(導入直後)場合はlatestをそのまま出す。
+        const raw = await env.DIGEST_KV.get("latest");
+        const digest = raw ? JSON.parse(raw) : null;
+        return new Response(renderHtml(digest), { headers: HTML_HEADERS });
+      }
+      return respondWithEdition(env, editions, editions[0]);
+    }
+
+    const dateMatch = url.pathname.match(/^\/(\d{4}-\d{2}-\d{2})$/);
+    if (dateMatch) {
+      return respondWithEdition(env, editions, dateMatch[1]);
+    }
+
+    return new Response("Not Found", { status: 404 });
   },
 };
