@@ -1,10 +1,17 @@
 import { XMLParser } from "fast-xml-parser";
+import PostalMime from "postal-mime";
+
+// TLDR AIのメール受信KVキー。email()ハンドラが書き込み、processFeedSource(経由の
+// buildInboxContent)が読む。feed.inboxにこのキーを持たせることでメール優先経路が有効になる。
+const TLDR_AI_INBOX_KEY = "inbox:tldr-ai:latest";
 
 // 取得するRSSフィード一覧。
 // mode: "single" -> 週刊フィード。最新1件のみ使用。cronはJST基準の月曜のみ取得する(isWeeklyRefreshDay参照)
 // mode: "multi"  -> 日刊フィード。直近5件を連結して1週間分として扱う。cronは毎日取得する
 // siteUrl: 画面下部の参照元フッターから貼るニュースレター本家サイトのURL。
-// TLDR AIのみ、取得(url)は非公式ミラーだがsiteUrlは本家(tldr.tech/ai)を指す。
+// inbox: 指定があるとメール受信(KV)を一次ソースとして優先し、無い/古い場合のみurlのRSSへ
+// フォールバックする(processFeedSource参照)。modeはフォールバック時に使う値なので、
+// メール優先ソースでも"multi"のまま変えないこと(scheduledの週次ゲート判定に影響するため)。
 const FEEDS = [
   {
     name: "Android Weekly",
@@ -20,10 +27,12 @@ const FEEDS = [
   },
   {
     name: "TLDR AI",
-    // TLDR公式はメール配信のみでRSSを提供していないため非公式ミラーを使用。
-    // ミラーが停止・URL変更した場合はここが動かなくなる（README/HANDOFF参照）。
+    // TLDR公式はメール配信のみでRSSを提供していない。email()ハンドラで受信したメールを
+    // 優先的に使い、非公式ミラー(RSS)は受信が無い/古いときのフォールバックとして残す
+    // （ミラーが停止・URL変更した場合や、ミラー側の配信漏れの両方に対応するため）。
     url: "https://bullrich.dev/tldr-rss/ai.rss",
     mode: "multi",
+    inbox: TLDR_AI_INBOX_KEY,
     siteUrl: "https://tldr.tech/ai",
   },
 ];
@@ -31,6 +40,15 @@ const FEEDS = [
 const MULTI_ITEM_LIMIT = 5;
 // リンク候補抽出(extractLinkCandidates)の上限。号あたりのリンク数が異常に多いフィード対策。
 const MAX_LINK_CANDIDATES = 40;
+// メールHTMLはRSSの号本文よりヘッダ・フッタ・スポンサー枠が多く、リンク数も多いため別枠で緩める。
+const INBOX_MAX_LINK_CANDIDATES = 80;
+// メール受信からこの時間を過ぎたらRSSフォールバックへ倒す(TLDRは米国時間午後配信=JST未明着なので
+// 5:00 JST cron時点で数時間前の新着がある想定。前日分の使い回しを防ぐ)。
+const INBOX_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+// TLDR AIの送信元として許可するドメイン。email()ハンドラでここに一致しない差出人を拒否する
+// (第三者が受信アドレスを知って任意のHTMLを送り込み、Geminiに要約させて公開ページに載せる
+// 経路を塞ぐため。SPF/DKIM/DMARCの検証自体はCloudflare Email Routing側で完了している前提)。
+const TLDR_AI_ALLOWED_SENDER_DOMAINS = ["tldrnewsletter.com", "tldr.tech"];
 const GEMINI_MODEL = "gemini-3.6-flash";
 
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
@@ -81,22 +99,25 @@ function stripHtml(html) {
 // 無関係な広告・登録・購読・ナビゲーション用リンクである可能性が高いので候補から除く
 // （本番実行でiOS Dev Weeklyの候補にこの種のリンクが混ざり、Geminiが本文中のどのトピックにも
 // 対応付けられず全エントリのcandidateIndexをnullにする事例が発生したため）。
-const GENERIC_LINK_TEXT = /^(here|read more|learn more|click here|register|registration link|sign ?up|subscribe|discount code|home ?page|this (article|post)|link)$/i;
+// unsubscribe等はメールニュースレター(TLDR AI)のフッタ由来のノイズ除け。
+const GENERIC_LINK_TEXT = /^(here|read more|learn more|click here|register|registration link|sign ?up|subscribe|unsubscribe|view (online|in browser)|manage (your )?(subscriptions?|preferences)|advertise( with us)?|sponsor(ed)?( by)?|discount code|home ?page|this (article|post)|link)$/i;
 
 /**
- * RSS本文のHTML中から <a href="URL">テキスト</a> をリンク候補として抽出する。
+ * RSS本文/メールHTML中から <a href="URL">テキスト</a> をリンク候補として抽出する。
  * Geminiに「どの候補が生成したトピックに対応するか」を選ばせるための材料になる
  * (buildPrompt/summarizeEntries参照)。フルDOMパースは過剰なため正規表現で簡易抽出する
  * （stripHtmlと同種の既知の技術的負債: 凝ったマークアップには弱い）。
+ * limit: 候補数の上限。メールHTMLはRSSの号本文よりノイズ(ヘッダ・フッタ・スポンサー)が
+ * 多いため、呼び出し側でINBOX_MAX_LINK_CANDIDATESのように緩めた値を渡せるようにしている。
  */
-function extractLinkCandidates(html) {
+export function extractLinkCandidates(html, limit = MAX_LINK_CANDIDATES) {
   const source = String(html ?? "");
   const candidates = [];
   const seen = new Set();
   const linkPattern = /<a\b[^>]*href\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
 
   let match;
-  while ((match = linkPattern.exec(source)) && candidates.length < MAX_LINK_CANDIDATES) {
+  while ((match = linkPattern.exec(source)) && candidates.length < limit) {
     const url = match[1].trim();
     const text = stripHtml(match[2]);
     if (!url || !text) continue;
@@ -110,6 +131,25 @@ function extractLinkCandidates(html) {
   }
 
   return candidates;
+}
+
+/**
+ * TLDRのメール内リンクはクリック計測のためラップされている
+ * (例: https://tracking.tldrnewsletter.com/CL0/<percent-encodeされた元URL>/<番号>/<ハッシュ>)。
+ * これをそのままentry.urlに使うと、送信のたびにハッシュが変わり同じ記事が毎日
+ * 「新着」として再掲載されてしまう(entryKeyがurlを既出判定キーにしているため)。
+ * パス中に percent-encode された元URLを探して復元する。取り出せない/不正な場合は
+ * ラップされたURLをそのまま返す(壊すよりリンクが機能する状態を優先する)。
+ */
+export function unwrapTrackingUrl(url) {
+  const raw = String(url ?? "");
+  const match = raw.match(/https?%3A%2F%2F[^/]+(?:%2F[^/]*)*/i);
+  if (!match) return raw;
+  try {
+    return new URL(decodeURIComponent(match[0])).href;
+  } catch {
+    return raw;
+  }
 }
 
 function toArray(value) {
@@ -214,6 +254,43 @@ function buildSourceContent(feed, items) {
       publishedAt: extractPubDate(item),
     })),
     latestLink: "",
+  };
+}
+
+/**
+ * メール優先ソース(feed.inbox指定あり)用に、email()ハンドラがKVへ保存した受信メールから
+ * buildSourceContentと同じ形(mode: "single")を組み立てる。TLDRのメールは1通に複数記事が
+ * 列挙された構造なので、候補リンク+candidateIndex方式(single経路)がそのまま適合する。
+ * 受信が無い/古すぎる/壊れている場合はnullを返す(エラーではない — 呼び出し側が
+ * RSSフォールバックへ倒す。throwするとstale fallbackが発動しRSSを試さず終わってしまう)。
+ */
+async function buildInboxContent(env, feed) {
+  const raw = await env.DIGEST_KV.get(feed.inbox);
+  if (!raw) return null;
+
+  let inbox;
+  try {
+    inbox = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+
+  const receivedAtMs = new Date(inbox.receivedAt ?? "").getTime();
+  if (!Number.isFinite(receivedAtMs) || Date.now() - receivedAtMs > INBOX_MAX_AGE_MS) {
+    return null;
+  }
+
+  const html = inbox.html ?? "";
+  return {
+    mode: "single",
+    combinedText: stripHtml(html),
+    candidates: extractLinkCandidates(html, INBOX_MAX_LINK_CANDIDATES).map((c) => ({
+      ...c,
+      url: unwrapTrackingUrl(c.url),
+    })),
+    latestLink: "", // TLDRに「号」URLの概念は無い(buildSourceContentのmulti分岐と同じ理由)
+    publishedAt: inbox.receivedAt,
+    subject: inbox.subject ?? "",
   };
 }
 
@@ -336,11 +413,10 @@ async function summarizeEntries(env, feed, built) {
 }
 
 /**
- * 1フィードを取得・構造化要約する。generateDigest/retryFailedSourcesの両方から使う。
+ * builtされたGemini入力を要約し、KVに保存する号アイテムの形にまとめる。
+ * RSS経路・メール経路の両方から呼ばれる共通の後半処理(processFeedSource参照)。
  */
-async function processFeedSource(env, feed) {
-  const items = await fetchFeedItems(feed.url);
-  const built = buildSourceContent(feed, items);
+async function summarizeIntoItem(env, feed, built, title) {
   const rawEntries = await summarizeEntries(env, feed, built);
 
   const entries = rawEntries
@@ -367,10 +443,26 @@ async function processFeedSource(env, feed) {
 
   return {
     source: feed.name,
-    title: stripHtml(items[0]?.title),
+    title,
     link: built.latestLink || "",
     entries,
   };
+}
+
+/**
+ * 1フィードを取得・構造化要約する。generateDigest/retryFailedSourcesの両方から使う。
+ * feed.inboxが指定されているソースは、email()ハンドラが受信したメール(KV)を優先し、
+ * 受信が無い/古すぎる場合のみurlのRSSへフォールバックする(buildInboxContent参照)。
+ */
+async function processFeedSource(env, feed) {
+  if (feed.inbox) {
+    const built = await buildInboxContent(env, feed);
+    if (built) return summarizeIntoItem(env, feed, built, built.subject);
+  }
+
+  const items = await fetchFeedItems(feed.url);
+  const built = buildSourceContent(feed, items);
+  return summarizeIntoItem(env, feed, built, stripHtml(items[0]?.title));
 }
 
 /**
@@ -971,6 +1063,16 @@ async function respondWithEdition(env, editions, date) {
   return new Response(renderHtml(edition, nav), { headers: HTML_HEADERS });
 }
 
+/**
+ * fromアドレスのドメインが許可リストに含まれるか。
+ * email()ハンドラの差出人検証にのみ使う(TLDR_AI_ALLOWED_SENDER_DOMAINS参照)。
+ */
+function isAllowedEmailSender(from, allowedDomains) {
+  const domain = String(from ?? "").split("@")[1]?.toLowerCase();
+  if (!domain) return false;
+  return allowedDomains.some((allowed) => domain === allowed || domain.endsWith(`.${allowed}`));
+}
+
 export default {
   async scheduled(event, env, ctx) {
     if (event.cron === RETRY_CRON) {
@@ -981,6 +1083,30 @@ export default {
       );
       ctx.waitUntil(generateDigest(env, feedsToProcess));
     }
+  },
+
+  /**
+   * Cloudflare Email Routingが受信したメールを処理する。要約は行わず、
+   * 受信内容をKVへ保存するだけ(processFeedSource経由のbuildInboxContentが5:00 JST cronで
+   * 読みに来る)。差出人検証を通らないメールはsetRejectで拒否する — 受信アドレスを知った
+   * 第三者が任意のHTMLを送り込み、それがGeminiに要約されて公開ページに載る経路を塞ぐため
+   * (SPF/DKIM/DMARCの検証自体はCloudflare Email Routing側で完了している前提)。
+   */
+  async email(message, env, ctx) {
+    if (!isAllowedEmailSender(message.from, TLDR_AI_ALLOWED_SENDER_DOMAINS)) {
+      message.setReject("Unexpected sender");
+      return;
+    }
+    const parsed = await PostalMime.parse(message.raw);
+    await env.DIGEST_KV.put(
+      TLDR_AI_INBOX_KEY,
+      JSON.stringify({
+        html: parsed.html ?? "",
+        subject: parsed.subject ?? "",
+        from: message.from,
+        receivedAt: new Date().toISOString(),
+      }),
+    );
   },
 
   async fetch(request, env) {
