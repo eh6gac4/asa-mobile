@@ -12,7 +12,8 @@ Cloudflare Workers上でパブリックなWebページとして公開するツ�
 
 ## 現在のステータス
 
-**デプロイ済み・稼働中。** `https://asa-mobile.toshiki-cho-dev.workers.dev`
+**デプロイ済み・稼働中。** `https://asa.eh6gac4.work`
+（旧URL `https://asa-mobile.toshiki-cho-dev.workers.dev` も引き続き有効）
 
 - Cloudflareログイン・KV namespace作成・Gemini APIキー登録・デプロイは完了済み
 - `.dev.vars` にもGemini APIキーをローカル用として保存済み(gitignore対象)
@@ -118,7 +119,7 @@ Markdown太字変換、staleカード、リンク欠落時の防御、エラー�
 ## 次にやること（優先順）
 
 1. 数日運用して、TLDR AIが毎日・Android/iOS Weeklyが週次で正しく更新されるか確認
-2. （余裕があれば）カスタムドメイン設定、TLDR AIミラーが死んだ時のフォールバック
+2. （余裕があれば）TLDR AIミラーが死んだ時のフォールバック
 
 ## 参照した外部情報
 
