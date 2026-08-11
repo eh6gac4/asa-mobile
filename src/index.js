@@ -450,19 +450,56 @@ async function summarizeIntoItem(env, feed, built, title) {
 }
 
 /**
+ * 取得した本文の同一性を判定するハッシュ。前回と一致するならGeminiを呼ばずに
+ * 前回の要約を使い回す(processFeedSource参照)。無料枠が1日20リクエストしかないため、
+ * 休刊日や未更新の号を毎日要約し直す無駄を省く。
+ * mode:"single"は号本文そのもの、mode:"multi"は記事URL/公開日/タイトルの並びを材料にする。
+ */
+export async function contentFingerprint(built) {
+  const material =
+    built.mode === "single"
+      ? [built.latestLink ?? "", built.publishedAt ?? "", built.combinedText ?? ""].join("\n")
+      : (built.multiItems ?? [])
+          .map((i) => `${i.url ?? ""}\t${i.publishedAt ?? ""}\t${i.title ?? ""}`)
+          .join("\n");
+  const bytes = new TextEncoder().encode(`${built.mode}\n${material}`);
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
  * 1フィードを取得・構造化要約する。generateDigest/retryFailedSourcesの両方から使う。
  * feed.inboxが指定されているソースは、email()ハンドラが受信したメール(KV)を優先し、
  * 受信が無い/古すぎる場合のみurlのRSSへフォールバックする(buildInboxContent参照)。
+ *
+ * prevItemには前回KVに保存されたitemを渡す。取得した本文のfingerprintが前回と一致すれば
+ * (=中身が変わっていない)、Geminiを呼ばずに前回の要約をそのまま返す(generatedAtも前回のまま
+ * 据え置く)。forceを渡すと一致していても強制的に再要約する(/run?force=1用)。
+ * nowISOはGeminiを実際に呼んだ場合にのみgeneratedAtとして使う。
  */
-async function processFeedSource(env, feed) {
+async function processFeedSource(env, feed, prevItem, nowISO, { force = false } = {}) {
+  let built = null;
+  let title = "";
   if (feed.inbox) {
-    const built = await buildInboxContent(env, feed);
-    if (built) return summarizeIntoItem(env, feed, built, built.subject);
+    built = await buildInboxContent(env, feed);
+    if (built) title = built.subject;
+  }
+  if (!built) {
+    const items = await fetchFeedItems(feed.url);
+    built = buildSourceContent(feed, items);
+    title = stripHtml(items[0]?.title);
   }
 
-  const items = await fetchFeedItems(feed.url);
-  const built = buildSourceContent(feed, items);
-  return summarizeIntoItem(env, feed, built, stripHtml(items[0]?.title));
+  const fingerprint = await contentFingerprint(built);
+  if (!force && prevItem && !prevItem.error && prevItem.fingerprint === fingerprint) {
+    // 取得内容が前回から変わっていない。entriesは既にseen:urls済みのはずなので
+    // buildEditionで弾かれ号には出ない。取得自体は成功しているのでstaleは落とす。
+    const { stale, ...rest } = prevItem;
+    return rest;
+  }
+
+  const item = await summarizeIntoItem(env, feed, built, title);
+  return { ...item, fingerprint, generatedAt: nowISO };
 }
 
 /**
@@ -473,11 +510,15 @@ async function processFeedSource(env, feed) {
  * 渡した場合、対象外のフィード(例: 月曜以外の日のAndroid/iOS Weekly)は
  * 取得を行わず、KVに残っている前回の結果をそのまま引き継ぐ。
  *
+ * 取得した本文が前回のfingerprintと一致するソースはGeminiを呼ばずに前回の要約を
+ * 使い回す(processFeedSource参照)。forceを渡すと一致していても強制的に再要約する
+ * (/run?force=1用)。
+ *
  * リトライ後もなお失敗したソースは、KVに残っている前回成功分を代わりに使い
  * (stale: trueを付与)、表示が「取得失敗」で丸ごと潰れないようにする。
  * 前回分も無ければ従来通りエラーを記録する。
  */
-async function generateDigest(env, feedsToProcess = FEEDS) {
+async function generateDigest(env, feedsToProcess = FEEDS, { force = false } = {}) {
   const prevRaw = await env.DIGEST_KV.get("latest");
   const prevDigest = prevRaw ? JSON.parse(prevRaw) : null;
   const prevBySource = new Map();
@@ -500,8 +541,7 @@ async function generateDigest(env, feedsToProcess = FEEDS) {
     }
 
     try {
-      const fresh = await processFeedSource(env, feed);
-      results.push({ ...fresh, generatedAt: nowISO });
+      results.push(await processFeedSource(env, feed, prevBySource.get(feed.name), nowISO, { force }));
     } catch (err) {
       const prevItem = prevBySource.get(feed.name);
       if (prevItem && !prevItem.error) {
@@ -550,8 +590,7 @@ async function retryFailedSources(env) {
     }
 
     try {
-      const fresh = await processFeedSource(env, feed);
-      updatedItems.push({ ...fresh, generatedAt: nowISO });
+      updatedItems.push(await processFeedSource(env, feed, item, nowISO));
     } catch {
       // リトライも失敗。既存のerror/staleエントリをそのまま維持する。
       updatedItems.push(item);
@@ -586,6 +625,9 @@ function entryKey(item, entry) {
  * seenMap[key] === dateKey (=当日) のentryは既出扱いにしない。リトライcronが
  * 同日中に再実行されても、自分が先に記録した分で紙面が空にならないようにするため
  * (冪等性)。
+ *
+ * error itemは単独では号を成立させない。新着entryが1件も無い日にエラーカードだけの
+ * 号が発行されるのを防ぐため(persistDigestの「号が空なら作らない」ゲートに対応)。
  */
 export function buildEdition(digest, seenMap, dateKey) {
   const items = [];
@@ -602,7 +644,10 @@ export function buildEdition(digest, seenMap, dateKey) {
       items.push({ ...item, entries });
     }
   }
-  return { date: dateKey, generatedAt: digest.generatedAt, items };
+  // itemsに入るのはerror itemか新着entryを持つitemのみ。error item以外が無ければ
+  // 新着はゼロなので、号を成立させない(persistDigestの「号が空なら作らない」ゲートに対応)。
+  const hasFreshEntry = items.some((item) => !item.error);
+  return { date: dateKey, generatedAt: digest.generatedAt, items: hasFreshEntry ? items : [] };
 }
 
 /**
@@ -623,7 +668,7 @@ async function persistDigest(env, digest) {
 
   const edition = buildEdition(digest, seenMap, dateKey);
   if (edition.items.length === 0) {
-    // その日の新着が無い(週刊ソースの非月曜など)。号は作らない。
+    // その日の新着が無い(週刊ソースの非月曜、取得失敗しか無かった日など)。号は作らない。
     return;
   }
 
@@ -1118,7 +1163,10 @@ export default {
       if (request.headers.get("x-run-secret") !== env.RUN_SECRET) {
         return new Response("Unauthorized", { status: 401 });
       }
-      const digest = await generateDigest(env);
+      // ?force=1 で、取得内容が前回と同じでもfingerprintキャッシュを無視して強制的に
+      // 再要約する(要約が失敗気味だったときの手動やり直し用)。
+      const force = url.searchParams.get("force") === "1";
+      const digest = await generateDigest(env, FEEDS, { force });
       return new Response(JSON.stringify(digest, null, 2), {
         headers: { "Content-Type": "application/json; charset=utf-8" },
       });

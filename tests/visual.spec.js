@@ -6,6 +6,7 @@ import {
   jstDateKey,
   unwrapTrackingUrl,
   extractLinkCandidates,
+  contentFingerprint,
 } from "../src/index.js";
 
 const mockDigest = {
@@ -280,11 +281,45 @@ test.describe("buildEdition", () => {
     expect(edition.items).toHaveLength(0);
   });
 
-  test("error itemはentryを持たなくてもそのまま号に含まれる", () => {
-    const seenMap = { "https://example.com/new": "2026-08-01", "https://example.com/old": "2026-08-01" };
+  test("新着entryがある日はerror itemも号に含まれる", () => {
+    const seenMap = { "https://example.com/old": "2026-08-01" };
     const edition = buildEdition(digest, seenMap, "2026-08-07");
 
     expect(edition.items.some((item) => item.error)).toBe(true);
+  });
+
+  test("新着entryが1件も無い日はerror itemだけの号を作らない", () => {
+    const seenMap = { "https://example.com/new": "2026-08-01", "https://example.com/old": "2026-08-01" };
+    const edition = buildEdition(digest, seenMap, "2026-08-07");
+
+    expect(edition.items).toHaveLength(0);
+  });
+});
+
+test.describe("contentFingerprint", () => {
+  test("同じbuiltからは同じハッシュが返る", async () => {
+    const built = { mode: "multi", multiItems: [{ url: "https://example.com/a", publishedAt: "2026-08-01", title: "A" }] };
+    const a = await contentFingerprint(built);
+    const b = await contentFingerprint(built);
+    expect(a).toBe(b);
+  });
+
+  test("mode:multiで記事URLが1件変わるとハッシュが変わる", async () => {
+    const base = { mode: "multi", multiItems: [{ url: "https://example.com/a", publishedAt: "2026-08-01", title: "A" }] };
+    const changed = { mode: "multi", multiItems: [{ url: "https://example.com/b", publishedAt: "2026-08-01", title: "A" }] };
+    expect(await contentFingerprint(base)).not.toBe(await contentFingerprint(changed));
+  });
+
+  test("mode:singleで本文が変わるとハッシュが変わる", async () => {
+    const base = { mode: "single", latestLink: "https://example.com/issue1", publishedAt: "2026-08-01", combinedText: "本文A" };
+    const changed = { mode: "single", latestLink: "https://example.com/issue1", publishedAt: "2026-08-01", combinedText: "本文B" };
+    expect(await contentFingerprint(base)).not.toBe(await contentFingerprint(changed));
+  });
+
+  test("modeが違えば材料が同じでもハッシュが変わる", async () => {
+    const single = { mode: "single", latestLink: "", publishedAt: "", combinedText: "x" };
+    const multi = { mode: "multi", multiItems: [] };
+    expect(await contentFingerprint(single)).not.toBe(await contentFingerprint(multi));
   });
 });
 

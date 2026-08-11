@@ -50,6 +50,10 @@ asa-mobile/
    - 各`entries[]`要素は`{ headline, description, url, publishedAt }`。`publishedAt`は
      RSSの`pubDate`をISO化したもので、`extractPubDate()`が抽出する。`mode: "single"`は
      号単位でしか公開日が取れないため、その号の全entryに同じ値をコピーする
+   - `processFeedSource()`は要約前に`contentFingerprint()`で取得内容のSHA-256ハッシュを
+     取り、前回KVに保存した`item.fingerprint`と一致すればGeminiを呼ばずに前回の要約を
+     そのまま使い回す。休刊日や号が未更新の日に同じ内容を毎日要約し直す無駄を防ぐため
+     （Gemini無料枠は1日20リクエストしかない）。`/run?force=1`で強制再要約できる
 4. 結果をJSON化して **Workers KV** に保存（`latest` キー + `history:YYYY-MM-DD` キーで履歴も保持）
 5. 取得・要約に失敗したソースは、KVに残っている前回成功分を `stale: true` 付きで代わりに表示する
    （前回分も無ければ従来通りエラー表示）。13時のリトライcronが失敗/staleソースだけを再試行する
@@ -59,7 +63,9 @@ asa-mobile/
      `seen:urls`（entry単位の既出URL台帳、90日でTTL剪定）と突き合わせ、まだ載せていない
      entryだけを残す。週刊ソースは月曜しか号が更新されないため、この差分抽出をしないと
      火〜日に同じ記事が並び続けてしまう。当日分は既出扱いにしないため、同日中にリトライcronが
-     再実行されても紙面が空にならない（冪等性）。新着が無い日はeditionを作らない
+     再実行されても紙面が空にならない（冪等性）。新着が無い日はeditionを作らない。
+     error itemは単独では号を成立させない（`buildEdition()`が新着entryの有無をチェックする）。
+     取得失敗ソースがあるだけでエラーカードのみの朝刊が発行されるのを防ぐため
    - `editions` … 号が存在する日付の降順配列。前号/次号ナビと`/archive`の元データ
    - entryのキーは `entry.url`（無ければ`source::headline`。single modeでGeminiが
      `candidateIndex`を対応付けられなかった場合にurlがnullになりうる）
@@ -75,7 +81,8 @@ asa-mobile/
      各ソース（`FEEDS[].siteUrl`）への公式サイトリンクを表示
 8. `/run` に POST すると全ソースを対象にcronを待たずに即時生成できる（テスト用）。
    `x-run-secret` ヘッダーが `env.RUN_SECRET` と一致しないと401（認証なしで公開すると
-   誰でもGemini APIキーを消費できてしまうため）
+   誰でもGemini APIキーを消費できてしまうため）。`?force=1` を付けると
+   `contentFingerprint`が一致していても強制的に再要約する
 
 ## 見た目のテスト
 
