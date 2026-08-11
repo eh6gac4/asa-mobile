@@ -61,6 +61,13 @@ cronの発火(毎日5:00 JST。週刊ソースは月曜のみ)を待たずに手
 curl -X POST https://<デプロイ先のURL>/run -H "x-run-secret: <RUN_SECRETの値>"
 ```
 
+取得内容が前回と同じソースはGeminiを呼ばずに前回の要約を使い回す(無料枠節約のため)。
+強制的に再要約したい場合は `?force=1` を付ける。
+
+```bash
+curl -X POST "https://<デプロイ先のURL>/run?force=1" -H "x-run-secret: <RUN_SECRETの値>"
+```
+
 以下を確認する:
 
 - 3ソース(Android Weekly / iOS Dev Weekly / TLDR AI)とも要約が生成されるか
@@ -81,7 +88,8 @@ curl -X POST https://<デプロイ先のURL>/run -H "x-run-secret: <RUN_SECRET�
 1つの号に載るのは「その日の新着分だけ」。Android Weekly / iOS Dev Weeklyは月曜しか更新
 されないため、KVの`history:`スナップショットをそのまま出すと同じ記事が何日も並んでしまう。
 既出URLを`seen:urls`に記録し、まだ載せていない記事だけを`edition:YYYY-MM-DD`として保存する
-仕組みになっている(詳細はHANDOFF.md参照)。
+仕組みになっている(詳細はHANDOFF.md参照)。新着が1件も無い日は、ソースの取得に失敗していても
+号を発行しない(エラーカードだけの朝刊にはならない)。
 
 ## ローカル開発
 
