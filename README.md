@@ -52,7 +52,19 @@ npx wrangler secret put RUN_SECRET
 npm run deploy
 ```
 
-### 7. 動作確認
+### 7. CI自動デプロイ用のCloudflare API Tokenを登録
+
+`main` にpush(=PRマージ)されると `.github/workflows/deploy.yml` が自動で `npm run deploy` を実行する。
+[Cloudflareダッシュボード](https://dash.cloudflare.com/profile/api-tokens)で「Edit Cloudflare Workers」
+テンプレートからAPI Tokenを発行し、GitHub Secretsに登録する。
+
+```bash
+gh secret set CLOUDFLARE_API_TOKEN -R eh6gac4/asa-mobile
+```
+
+未登録の場合、mainへのpushのたびにワークフローが失敗する(手動`npm run deploy`には影響しない)。
+
+### 8. 動作確認
 
 cronの発火(毎日5:00 JST。週刊ソースは月曜のみ)を待たずに手動実行できる。
 `/run` は3ソースすべてを対象に実行する。`x-run-secret` ヘッダーに手順5で登録した値を渡す。
