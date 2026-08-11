@@ -28,8 +28,19 @@ asa-mobile/
 ├── tests/
 │   └── visual.spec.js   # Playwrightによる見た目テスト（renderHtml()の出力を検証）
 ├── playwright.config.js
+├── .github/workflows/
+│   └── deploy.yml        # mainへのpush(=PRマージ)で自動 `npm run deploy` するCI
 └── README.md            # セットアップ・テスト手順
 ```
+
+## CI/CD
+
+`.github/workflows/deploy.yml` が `main` へのpushをトリガーに `npm run deploy`
+(=`wrangler deploy`)を実行する。認証は `CLOUDFLARE_API_TOKEN` というGitHub Secret
+(README参照)。テストはCIに組み込んでいない(`npm run test:visual` はPlaywrightの
+ブラウザインストールが要り、デプロイをブロックするほど重くする必要は無いと判断)。
+デプロイに失敗させたくない変更は、マージ前にローカルで `npm run test:visual` を
+実行して確認すること。
 
 ## アーキテクチャ
 
