@@ -853,6 +853,7 @@ function renderShell({ headerRight, body }) {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>朝刊モバイル</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1082,6 +1083,28 @@ function isWeeklyRefreshDay(scheduledTime) {
 
 const HTML_HEADERS = { "Content-Type": "text/html; charset=utf-8" };
 
+// フィード画面のタイムラインノード(ソース別アクセントカラーのドット)をリング状にした
+// favicon。ダークモードはprefers-color-schemeで自動切り替え。
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+<style>
+.bg{fill:oklch(99% 0.004 95)}
+.dot{fill:oklch(18% 0.01 95)}
+@media (prefers-color-scheme: dark) {
+.bg{fill:oklch(15% 0.008 95)}
+.dot{fill:oklch(94% 0.006 95)}
+}
+</style>
+<circle class="bg" cx="50" cy="50" r="50"/>
+<g transform="rotate(-90 50 50)" fill="none" stroke-width="14">
+<circle cx="50" cy="50" r="32" stroke="oklch(62% 0.15 155)" stroke-dasharray="50.2655 150.7964" stroke-dashoffset="0"/>
+<circle cx="50" cy="50" r="32" stroke="oklch(62% 0.15 255)" stroke-dasharray="50.2655 150.7964" stroke-dashoffset="-50.2655"/>
+<circle cx="50" cy="50" r="32" stroke="oklch(62% 0.15 330)" stroke-dasharray="50.2655 150.7964" stroke-dashoffset="-100.531"/>
+<circle cx="50" cy="50" r="32" stroke="oklch(62% 0.15 40)" stroke-dasharray="50.2655 150.7964" stroke-dashoffset="-150.7964"/>
+</g>
+<circle class="dot" cx="50" cy="50" r="12"/>
+</svg>
+`;
+
 /**
  * 号ページ("/"または"/YYYY-MM-DD")のレスポンスを組み立てる。
  * editions(新しい日付が先頭の降順配列)上でのdateの位置から前号/次号を求める。
@@ -1174,6 +1197,15 @@ export default {
 
     if (request.method !== "GET") {
       return new Response("Not Found", { status: 404 });
+    }
+
+    if (url.pathname === "/favicon.svg") {
+      return new Response(FAVICON_SVG, {
+        headers: {
+          "Content-Type": "image/svg+xml; charset=utf-8",
+          "Cache-Control": "public, max-age=86400",
+        },
+      });
     }
 
     if (url.pathname === "/archive") {
