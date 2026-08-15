@@ -827,21 +827,22 @@ function renderSourcesFooter() {
 /**
  * 号ページの前号/次号ナビ。editionsは新しい日付が先頭の降順配列なので、
  * prevDate(過去へ)はindex+1、nextDate(未来へ)はindex-1側になる(呼び出し元で算出)。
+ * 右矢印(→)で過去へ遡る向きにするため、prevDateを右側、nextDateを左側に配置する。
  * 端では該当リンクの代わりに無効表示にする。
  */
 function renderNav(nav) {
   if (!nav) return "";
-  const prevHtml = nav.prevDate
-    ? `<a href="/${nav.prevDate}">← ${escapeHtml(formatShortDate(nav.prevDate))}</a>`
+  const leftHtml = nav.nextDate
+    ? `<a href="/${nav.nextDate}">← ${escapeHtml(formatShortDate(nav.nextDate))}</a>`
     : `<span class="disabled">←</span>`;
-  const nextHtml = nav.nextDate
-    ? `<a href="/${nav.nextDate}">${escapeHtml(formatShortDate(nav.nextDate))} →</a>`
+  const rightHtml = nav.prevDate
+    ? `<a href="/${nav.prevDate}">${escapeHtml(formatShortDate(nav.prevDate))} →</a>`
     : `<span class="disabled">→</span>`;
   return `
 <nav class="nav">
-  ${prevHtml}
+  ${leftHtml}
   <a class="spacer" href="/archive">バックナンバー</a>
-  ${nextHtml}
+  ${rightHtml}
 </nav>`;
 }
 
@@ -1000,12 +1001,15 @@ const PAGE_STYLES = `
   .empty-line a { color: var(--ink); text-decoration: underline; }
   @media (prefers-color-scheme: dark) { .empty-line a { color: var(--ink-dark); } }
 
-  .nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line); font-family: "JetBrains Mono", monospace; font-size: 12px; }
+  .nav { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line); font-family: "JetBrains Mono", monospace; font-size: 12px; }
   @media (prefers-color-scheme: dark) { .nav { border-top-color: var(--line-dark); } }
   .nav a { color: var(--soft); }
   @media (prefers-color-scheme: dark) { .nav a { color: var(--soft-dark); } }
   .nav a:hover { text-decoration: underline; }
   .nav .disabled { color: var(--line); }
+  .nav > :first-child { justify-self: start; }
+  .nav > .spacer { justify-self: center; }
+  .nav > :last-child { justify-self: end; }
   @media (prefers-color-scheme: dark) { .nav .disabled { color: var(--line-dark); } }
 
   .archive-group { margin-bottom: 24px; }
