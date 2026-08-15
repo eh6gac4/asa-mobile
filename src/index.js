@@ -1,5 +1,6 @@
 import { XMLParser } from "fast-xml-parser";
 import PostalMime from "postal-mime";
+import { APPLE_TOUCH_ICON_PNG_BASE64 } from "./apple-touch-icon.base64.js";
 
 // TLDR AIのメール受信KVキー。email()ハンドラが書き込み、processFeedSource(経由の
 // buildInboxContent)が読む。feed.inboxにこのキーを持たせることでメール優先経路が有効になる。
@@ -854,6 +855,7 @@ function renderShell({ headerRight, body }) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>朝刊モバイル</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1203,6 +1205,15 @@ export default {
       return new Response(FAVICON_SVG, {
         headers: {
           "Content-Type": "image/svg+xml; charset=utf-8",
+          "Cache-Control": "public, max-age=86400",
+        },
+      });
+    }
+
+    if (url.pathname === "/apple-touch-icon.png") {
+      return new Response(Uint8Array.from(atob(APPLE_TOUCH_ICON_PNG_BASE64), (c) => c.charCodeAt(0)), {
+        headers: {
+          "Content-Type": "image/png",
           "Cache-Control": "public, max-age=86400",
         },
       });
