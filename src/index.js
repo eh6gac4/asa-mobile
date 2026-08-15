@@ -295,6 +295,14 @@ async function buildInboxContent(env, feed) {
   };
 }
 
+// entriesに付与する「開発者（自分）への影響」の生成指示。single/multi両モードで共通なので
+// buildPromptから両方参照する。読み手はモバイルアプリ(Android/iOS)開発者本人という前提。
+const IMPACT_INSTRUCTION =
+  `さらに各トピックについて、読者であるモバイルアプリ(Android/iOS)開発者自身の開発業務にとっての` +
+  `影響も添えてください。impactGoodには具体的に役立つ点(効率化・新機能・学びなど、1文20〜40字程度)、` +
+  `impactBadには注意すべき点(移行コスト・非推奨化・学習コストなど、1文20〜40字程度)を書いてください。` +
+  `明確な影響が無ければ無理に作らず空文字列にしてください。`;
+
 function buildPrompt(feed, built) {
   if (built.mode === "single") {
     const candidateLines = built.candidates
@@ -308,7 +316,8 @@ function buildPrompt(feed, built) {
       `他の号への相互リンクなど本文の内容と無関係なものも混ざっています。各トピックについて、` +
       `そのトピックの内容と実際に一致する記事へのリンクが候補にあれば、最も合致する番号を` +
       `candidateIndexとして選んでください。少しでも自信が無い場合や、該当する記事が無い場合は` +
-      `無理に対応付けずcandidateIndexをnullにしてください。一覧に無いURLを作り出さないでください。\n\n` +
+      `無理に対応付けずcandidateIndexをnullにしてください。一覧に無いURLを作り出さないでください。\n` +
+      `${IMPACT_INSTRUCTION}\n\n` +
       `# 候補リンク一覧\n${candidateLines || "(候補なし)"}\n\n` +
       `# 本文\n${built.combinedText}`
     );
@@ -320,7 +329,8 @@ function buildPrompt(feed, built) {
   return (
     `以下は「${feed.name}」というニュースレターの直近の記事一覧です。` +
     `各記事について、日本語で見出し(15〜25字程度)と説明(1〜2文、40〜80字程度)を作成してください。` +
-    `記事の順序を変えず、記事数ちょうどの件数を出力してください。前置きや結びの文は不要です。\n\n${itemLines}`
+    `記事の順序を変えず、記事数ちょうどの件数を出力してください。前置きや結びの文は不要です。\n` +
+    `${IMPACT_INSTRUCTION}\n\n${itemLines}`
   );
 }
 
@@ -328,6 +338,8 @@ function buildResponseSchema(built) {
   const properties = {
     headline: { type: "STRING" },
     description: { type: "STRING" },
+    impactGood: { type: "STRING" },
+    impactBad: { type: "STRING" },
   };
   if (built.mode === "single") {
     properties.candidateIndex = { type: "INTEGER", nullable: true };
@@ -424,6 +436,8 @@ async function summarizeIntoItem(env, feed, built, title) {
     .map((raw, index) => {
       const headline = String(raw?.headline ?? "").trim();
       const description = String(raw?.description ?? "").trim();
+      const impactGood = String(raw?.impactGood ?? "").trim();
+      const impactBad = String(raw?.impactBad ?? "").trim();
 
       let url = null;
       let publishedAt = null;
@@ -438,7 +452,7 @@ async function summarizeIntoItem(env, feed, built, title) {
         publishedAt = built.multiItems[index]?.publishedAt || null;
       }
 
-      return { headline, description, url, publishedAt };
+      return { headline, description, impactGood, impactBad, url, publishedAt };
     })
     .filter((entry) => entry.headline && entry.description);
 
@@ -784,6 +798,20 @@ function renderEntryRow(item, entry) {
     ? `<a class="headline" href="${escapeHtml(entry.url)}" target="_blank" rel="noopener">${headlineText}</a>`
     : `<span class="headline">${headlineText}</span>`;
 
+  // impactGood/impactBad(自分への良い影響/悪い影響)は旧スキーマのentryやGeminiが
+  // 明確な影響なしと判断した場合に空/未設定になりうるため、値がある方だけ描画する。
+  const impactItemsHtml = [
+    ["impact-good", "＋", entry.impactGood],
+    ["impact-bad", "－", entry.impactBad],
+  ]
+    .filter(([, , text]) => text)
+    .map(
+      ([cls, icon, text]) =>
+        `<li class="${cls}"><span class="impact-icon">${icon}</span>${renderInlineMarkdown(escapeHtml(text))}</li>`,
+    )
+    .join("");
+  const impactHtml = impactItemsHtml ? `<ul class="impact">${impactItemsHtml}</ul>` : "";
+
   return `
       <div class="row" data-source="${slug}">
         <span class="node"></span>
@@ -794,6 +822,7 @@ function renderEntryRow(item, entry) {
         </div>
         ${headlineHtml}
         <p class="desc">${renderInlineMarkdown(escapeHtml(entry.description))}</p>
+        ${impactHtml}
       </div>`;
 }
 
@@ -932,6 +961,8 @@ const PAGE_STYLES = `
     --accent-tldr: oklch(62% 0.15 330);
     --accent-other: oklch(62% 0.15 40);
     --danger: oklch(58% 0.19 25);
+    --good: oklch(55% 0.14 155);
+    --bad: oklch(55% 0.16 40);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -990,6 +1021,12 @@ const PAGE_STYLES = `
   .row a.headline:hover { text-decoration: underline; text-underline-offset: 3px; }
   .row .desc { font-size: 14px; line-height: 1.75; color: var(--soft); margin: 0; max-width: 56ch; }
   @media (prefers-color-scheme: dark) { .row .desc { color: var(--soft-dark); } }
+
+  .row .impact { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-width: 56ch; }
+  .row .impact li { font-size: 12.5px; line-height: 1.6; display: flex; gap: 6px; }
+  .row .impact-good { color: var(--good); }
+  .row .impact-bad { color: var(--bad); }
+  .row .impact-icon { flex: none; font-weight: 700; }
 
   .row.error .headline { color: var(--danger); }
   .row.error .desc { color: var(--danger); font-family: "JetBrains Mono", monospace; font-size: 12px; }

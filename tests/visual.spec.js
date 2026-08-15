@@ -191,6 +191,46 @@ test("記事は公開日の新しい順にソースをまたいでフラット�
   await expect(rows.nth(3)).toHaveClass(/error/);
 });
 
+test("開発者への良い影響/悪い影響があるentryはimpactリストとして表示される", async ({ page }) => {
+  const digestWithImpact = {
+    generatedAt: "2026-08-05T00:00:00.000Z",
+    items: [
+      {
+        source: "Android Weekly",
+        title: "Android Weekly Issue #738",
+        link: "https://androidweekly.net/issues/issue-738/",
+        generatedAt: "2026-08-03T00:00:00.000Z",
+        entries: [
+          {
+            headline: "新APIの追加",
+            description: "説明文。",
+            impactGood: "実装が簡潔になる",
+            impactBad: "既存コードの移行が必要",
+            url: null,
+            publishedAt: "2026-08-02T10:36:59.000Z",
+          },
+          {
+            headline: "影響なしのentry",
+            description: "説明文。",
+            impactGood: "",
+            impactBad: "",
+            url: null,
+            publishedAt: "2026-08-02T10:36:59.000Z",
+          },
+        ],
+      },
+    ],
+  };
+  await page.setContent(renderHtml(digestWithImpact));
+
+  const rows = page.locator('.row[data-source="android"]');
+  const firstImpact = rows.nth(0).locator(".impact");
+  await expect(firstImpact.locator(".impact-good")).toContainText("実装が簡潔になる");
+  await expect(firstImpact.locator(".impact-bad")).toContainText("既存コードの移行が必要");
+
+  await expect(rows.nth(1).locator(".impact")).toHaveCount(0);
+});
+
 test("画面下部に参照元3サイトへのリンクが表示される", async ({ page }) => {
   await page.setContent(renderHtml(mockDigest));
 
