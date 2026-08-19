@@ -492,6 +492,21 @@ export async function contentFingerprint(built) {
  * 据え置く)。forceを渡すと一致していても強制的に再要約する(/run?force=1用)。
  * nowISOはGeminiを実際に呼んだ場合にのみgeneratedAtとして使う。
  */
+function errorMessage(err) {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * 1ソース分の処理結果を、表示用のresults(digestのitems)と調査用のlogEntries
+ * (appendRunLog参照)の両方に反映する。stale時、resultsにはエラー文言を含めない
+ * (表示には出さない設計)が、logEntriesには残す。1箇所にまとめることで、
+ * generateDigest/retryFailedSourcesの各分岐でsourceの取り違えなどが起きないようにする。
+ */
+function recordSourceResult(results, logEntries, source, resultItem, status, error) {
+  results.push(resultItem);
+  logEntries.push(error === undefined ? { source, status } : { source, status, error });
+}
+
 async function processFeedSource(env, feed, prevItem, nowISO, { force = false } = {}) {
   let built = null;
   let title = "";
@@ -533,7 +548,7 @@ async function processFeedSource(env, feed, prevItem, nowISO, { force = false } 
  * (stale: trueを付与)、表示が「取得失敗」で丸ごと潰れないようにする。
  * 前回分も無ければ従来通りエラーを記録する。
  */
-async function generateDigest(env, feedsToProcess = FEEDS, { force = false } = {}) {
+async function generateDigest(env, feedsToProcess = FEEDS, { force = false, trigger = "manual" } = {}) {
   const prevRaw = await env.DIGEST_KV.get("latest");
   const prevDigest = prevRaw ? JSON.parse(prevRaw) : null;
   const prevBySource = new Map();
@@ -546,6 +561,7 @@ async function generateDigest(env, feedsToProcess = FEEDS, { force = false } = {
   const nowISO = new Date().toISOString();
   const targetNames = new Set(feedsToProcess.map((f) => f.name));
   const results = [];
+  const logEntries = [];
 
   for (const feed of FEEDS) {
     if (!targetNames.has(feed.name)) {
@@ -556,22 +572,22 @@ async function generateDigest(env, feedsToProcess = FEEDS, { force = false } = {
     }
 
     try {
-      results.push(await processFeedSource(env, feed, prevBySource.get(feed.name), nowISO, { force }));
+      const item = await processFeedSource(env, feed, prevBySource.get(feed.name), nowISO, { force });
+      recordSourceResult(results, logEntries, feed.name, item, "ok");
     } catch (err) {
+      const message = errorMessage(err);
       const prevItem = prevBySource.get(feed.name);
       if (prevItem && !prevItem.error) {
-        results.push({ ...prevItem, stale: true });
+        recordSourceResult(results, logEntries, feed.name, { ...prevItem, stale: true }, "stale", message);
       } else {
-        results.push({
-          source: feed.name,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        recordSourceResult(results, logEntries, feed.name, { source: feed.name, error: message }, "error", message);
       }
     }
   }
 
   const digest = { generatedAt: nowISO, items: results };
   await persistDigest(env, digest);
+  await appendRunLog(env, { at: nowISO, trigger, results: logEntries });
 
   return digest;
 }
@@ -591,6 +607,7 @@ async function retryFailedSources(env) {
 
   const nowISO = new Date().toISOString();
   const updatedItems = [];
+  const logEntries = [];
 
   for (const item of digest.items) {
     if (!item.error && !item.stale) {
@@ -605,17 +622,42 @@ async function retryFailedSources(env) {
     }
 
     try {
-      updatedItems.push(await processFeedSource(env, feed, item, nowISO));
-    } catch {
+      const recovered = await processFeedSource(env, feed, item, nowISO);
+      recordSourceResult(updatedItems, logEntries, item.source, recovered, "recovered");
+    } catch (err) {
       // リトライも失敗。既存のerror/staleエントリをそのまま維持する。
-      updatedItems.push(item);
+      recordSourceResult(updatedItems, logEntries, item.source, item, "error", errorMessage(err));
     }
   }
 
   const digestOut = { generatedAt: nowISO, items: updatedItems };
   await persistDigest(env, digestOut);
+  // needsRetryがtrueの時点でerror/staleが最低1件あり、それは必ずこのループを通るため
+  // logEntriesは常に1件以上ある。
+  await appendRunLog(env, { at: nowISO, trigger: "retry", results: logEntries });
 
   return digestOut;
+}
+
+// 実行ログ("logs"キー)に保持する件数の上限。generateDigest/retryFailedSourcesは
+// 実行のたびにappendRunLogを呼ぶため、無制限に貯めるとKVが肥大化する。
+const LOG_MAX_ENTRIES = 50;
+
+/**
+ * 1回の実行(cron発火または手動/run)の結果をKVの"logs"キーに追記する。
+ * 従来はソース単位の失敗(error/stale)がKVに残らず、原因調査ができなかった
+ * (前回成功分で上書きされるため)。ここに追記しておけば、staleが続く原因の
+ * エラーメッセージを後から遡って確認できる。
+ * trigger: どの経路からの実行か("manual" | cron文字列 | "retry")。
+ * results: [{ source, status: "ok"|"stale"|"error"|"recovered", error? }]
+ */
+async function appendRunLog(env, entry) {
+  const raw = await env.DIGEST_KV.get("logs");
+  const logs = raw ? JSON.parse(raw) : [];
+  logs.push(entry);
+  // appendRunLogは1回の実行につき1件しか積まないため、超過は常に高々1件。
+  if (logs.length > LOG_MAX_ENTRIES) logs.shift();
+  await env.DIGEST_KV.put("logs", JSON.stringify(logs));
 }
 
 // seen:urls に記録した既出URLをいつまで保持するか。これより古い記録は
@@ -1184,6 +1226,18 @@ function isAllowedEmailSender(from, allowedDomains) {
   return allowedDomains.some((allowed) => domain === allowed || domain.endsWith(`.${allowed}`));
 }
 
+/**
+ * 認証なしで公開すると、URLを知っている誰でも叩けてしまう(/runはGemini APIキー消費、
+ * /logsは内部エラーメッセージの閲覧につながる)。共有シークレットで保護する。
+ * 未認証ならUnauthorizedレスポンスを返し、認証済みならnullを返す。
+ */
+function requireRunSecret(request, env) {
+  if (request.headers.get("x-run-secret") !== env.RUN_SECRET) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  return null;
+}
+
 export default {
   async scheduled(event, env, ctx) {
     if (event.cron === RETRY_CRON) {
@@ -1192,7 +1246,7 @@ export default {
       const feedsToProcess = FEEDS.filter(
         (feed) => feed.mode === "multi" || isWeeklyRefreshDay(event.scheduledTime),
       );
-      ctx.waitUntil(generateDigest(env, feedsToProcess));
+      ctx.waitUntil(generateDigest(env, feedsToProcess, { trigger: event.cron }));
     }
   },
 
@@ -1224,11 +1278,8 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "POST" && url.pathname === "/run") {
-      // 認証なしで公開すると、URLを知っている誰でもこのエンドポイントを叩いて
-      // こちらのGemini APIキーでリクエストを消費できてしまう。共有シークレットで保護する。
-      if (request.headers.get("x-run-secret") !== env.RUN_SECRET) {
-        return new Response("Unauthorized", { status: 401 });
-      }
+      const unauthorized = requireRunSecret(request, env);
+      if (unauthorized) return unauthorized;
       // ?force=1 で、取得内容が前回と同じでもfingerprintキャッシュを無視して強制的に
       // 再要約する(要約が失敗気味だったときの手動やり直し用)。
       const force = url.searchParams.get("force") === "1";
@@ -1240,6 +1291,16 @@ export default {
 
     if (request.method !== "GET") {
       return new Response("Not Found", { status: 404 });
+    }
+
+    if (url.pathname === "/logs") {
+      const unauthorized = requireRunSecret(request, env);
+      if (unauthorized) return unauthorized;
+      const raw = await env.DIGEST_KV.get("logs");
+      const logs = raw ? JSON.parse(raw) : [];
+      return new Response(JSON.stringify(logs, null, 2), {
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      });
     }
 
     if (url.pathname === "/favicon.svg") {

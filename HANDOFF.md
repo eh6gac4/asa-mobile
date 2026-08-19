@@ -67,7 +67,11 @@ asa-mobile/
      （Gemini無料枠は1日20リクエストしかない）。`/run?force=1`で強制再要約できる
 4. 結果をJSON化して **Workers KV** に保存（`latest` キー + `history:YYYY-MM-DD` キーで履歴も保持）
 5. 取得・要約に失敗したソースは、KVに残っている前回成功分を `stale: true` 付きで代わりに表示する
-   （前回分も無ければ従来通りエラー表示）。13時のリトライcronが失敗/staleソースだけを再試行する
+   （前回分も無ければ従来通りエラー表示）。13時のリトライcronが失敗/staleソースだけを再試行する。
+   `stale`/`error`になった際のエラーメッセージ自体はdigestには残らない（前回成功分で上書きされる/
+   エラー文言は表示用の`error`フィールドどまり）ため、`appendRunLog()`が実行のたびに
+   `logs`キー（直近50件、`GET /logs`で参照可）へ`{source, status, error}`を追記する。
+   原因調査用のログで、表示用のdigestとは別物
 6. `persistDigest()` がKV保存を一手に引き受ける（`generateDigest`/`retryFailedSources`両方から
    呼ぶ共通処理）。`latest`/`history:YYYY-MM-DD`に加えて、以下も更新する:
    - `edition:YYYY-MM-DD` … その日の**新着分だけ**を抜き出した「号」。`buildEdition()`が
