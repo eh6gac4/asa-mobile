@@ -87,6 +87,16 @@ curl -X POST "https://<デプロイ先のURL>/run?force=1" -H "x-run-secret: <RU
 
 デプロイ先のトップページ (`GET /`) にアクセスすると、最新号がHTMLで表示される。
 
+### 9. 実行ログの確認
+
+各ソースの取得・要約が成功/失敗したかの履歴(直近50件)を確認できる。
+`stale`(前回分の使い回し)や`error`になった場合、原因のエラーメッセージも含まれる。
+`/run`と同じ`x-run-secret`ヘッダーで保護されている。
+
+```bash
+curl https://<デプロイ先のURL>/logs -H "x-run-secret: <RUN_SECRETの値>"
+```
+
 ## URL構成
 
 朝刊らしく、日付ごとにユニークなURLを持つ「号」として過去に遡れる。
