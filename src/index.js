@@ -299,8 +299,9 @@ async function buildInboxContent(env, feed) {
 // buildPromptから両方参照する。読み手はモバイルアプリ(Android/iOS)開発者本人という前提。
 const IMPACT_INSTRUCTION =
   `さらに各トピックについて、読者であるモバイルアプリ(Android/iOS)開発者自身の開発業務にとっての` +
-  `影響も添えてください。impactGoodには具体的に役立つ点(効率化・新機能・学びなど、1文20〜40字程度)、` +
-  `impactBadには注意すべき点(移行コスト・非推奨化・学習コストなど、1文20〜40字程度)を書いてください。` +
+  `影響も添えてください。「役立つ点」には具体的に役立つ内容(効率化・新機能・学びなど、1文20〜40字程度)、` +
+  `「注意すべき点」には気をつけるべき内容(移行コスト・非推奨化・学習コストなど、1文20〜40字程度)を` +
+  `書いてください。項目名やラベルは書かず、内容の文章だけを書いてください。` +
   `明確な影響が無ければ無理に作らず空文字列にしてください。`;
 
 function buildPrompt(feed, built) {
@@ -336,10 +337,24 @@ function buildPrompt(feed, built) {
 
 function buildResponseSchema(built) {
   const properties = {
-    headline: { type: "STRING" },
-    description: { type: "STRING" },
-    impactGood: { type: "STRING" },
-    impactBad: { type: "STRING" },
+    headline: {
+      type: "STRING",
+      description: "トピックの見出し(15〜25字程度)。項目名やラベルを含めず、見出しの文章のみ。",
+    },
+    description: {
+      type: "STRING",
+      description: "トピックの説明文(1〜2文、40〜80字程度)。項目名やラベルを含めず、本文の文章のみ。",
+    },
+    impactGood: {
+      type: "STRING",
+      description:
+        "モバイルアプリ開発者にとって具体的に役立つ点(1文20〜40字程度)。項目名やラベルを含めず、内容の文章のみ。明確な影響が無ければ空文字列。",
+    },
+    impactBad: {
+      type: "STRING",
+      description:
+        "モバイルアプリ開発者が注意すべき点(1文20〜40字程度)。項目名やラベルを含めず、内容の文章のみ。明確な影響が無ければ空文字列。",
+    },
   };
   if (built.mode === "single") {
     properties.candidateIndex = { type: "INTEGER", nullable: true };
@@ -429,15 +444,24 @@ async function summarizeEntries(env, feed, built) {
  * builtされたGemini入力を要約し、KVに保存する号アイテムの形にまとめる。
  * RSS経路・メール経路の両方から呼ばれる共通の後半処理(processFeedSource参照)。
  */
+// Geminiが構造化出力のvalue先頭に "impactGood: " のようなラベル風の文字列を
+// 混入させることがあるため、表示前に取り除く(910f841のフォローアップ)。
+// "Kotlin: Coroutines新版"のような正当な見出し文言を誤って削らないよう、
+// 既知のスキーマフィールド名に限定してマッチさせる。
+const LABEL_PREFIX_RE = /^(headline|description|impactGood|impactBad)\s*[:：]\s*/i;
+function stripLabelPrefix(text) {
+  return text.replace(LABEL_PREFIX_RE, "");
+}
+
 async function summarizeIntoItem(env, feed, built, title) {
   const rawEntries = await summarizeEntries(env, feed, built);
 
   const entries = rawEntries
     .map((raw, index) => {
-      const headline = String(raw?.headline ?? "").trim();
-      const description = String(raw?.description ?? "").trim();
-      const impactGood = String(raw?.impactGood ?? "").trim();
-      const impactBad = String(raw?.impactBad ?? "").trim();
+      const headline = stripLabelPrefix(String(raw?.headline ?? "").trim());
+      const description = stripLabelPrefix(String(raw?.description ?? "").trim());
+      const impactGood = stripLabelPrefix(String(raw?.impactGood ?? "").trim());
+      const impactBad = stripLabelPrefix(String(raw?.impactBad ?? "").trim());
 
       let url = null;
       let publishedAt = null;
