@@ -2,6 +2,14 @@ name = "asa-mobile"
 main = "src/index.js"
 compatibility_date = "2026-08-01"
 
+# カスタムドメイン。ゾーン eh6gac4.work は同一Cloudflareアカウントで管理している前提。
+# custom_domain = true にすると deploy 時にDNSレコードと証明書が自動作成される。
+# routesを設定するとworkers.devが既定で無効化されるため、workers_devで明示的に維持する。
+routes = [
+  { pattern = "asa.eh6gac4.work", custom_domain = true }
+]
+workers_dev = true
+
 # 毎日 20:00 UTC(前日) = 5:00 JST (本番) / 00:00 UTC = 9:00 JST (Gemini一時エラー時のリトライ)
 # TLDR AI(日刊)は毎回取得するが、Android/iOS Weekly(週刊)は本番cron側で
 # 月曜のみに絞る(src/index.jsのisWeeklyRefreshDay参照)。JST基準の月曜なので

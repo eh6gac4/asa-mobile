@@ -52,7 +52,18 @@ npx wrangler secret put RUN_SECRET
 npm run deploy
 ```
 
-### 7. CI自動デプロイ用のCloudflare API Tokenを登録
+### 7. カスタムドメイン
+
+`wrangler.toml` の `routes` に `custom_domain = true` でホスト名を設定している
+（現在は `asa.eh6gac4.work`）。対象ゾーンがWorkerと同一のCloudflareアカウントで
+管理されていれば、`npm run deploy` 時にDNSレコードと証明書が自動作成される。
+`workers.dev` のURLもデフォルトで残り続ける。
+
+初回のドメイン紐付けは、CI用トークンのゾーン権限が不足している可能性があるため
+`npx wrangler login` 済みのローカルから `npm run deploy` を実行して確立させること。
+以降はCIからの再適用でも通る。
+
+### 8. CI自動デプロイ用のCloudflare API Tokenを登録
 
 `main` にpush(=PRマージ)されると `.github/workflows/deploy.yml` が自動で `npm run deploy` を実行する。
 [Cloudflareダッシュボード](https://dash.cloudflare.com/profile/api-tokens)で「Edit Cloudflare Workers」
@@ -64,20 +75,20 @@ gh secret set CLOUDFLARE_API_TOKEN -R eh6gac4/asa-mobile
 
 未登録の場合、mainへのpushのたびにワークフローが失敗する(手動`npm run deploy`には影響しない)。
 
-### 8. 動作確認
+### 9. 動作確認
 
 cronの発火(毎日5:00 JST。週刊ソースは月曜のみ)を待たずに手動実行できる。
 `/run` は3ソースすべてを対象に実行する。`x-run-secret` ヘッダーに手順5で登録した値を渡す。
 
 ```bash
-curl -X POST https://<デプロイ先のURL>/run -H "x-run-secret: <RUN_SECRETの値>"
+curl -X POST https://asa.eh6gac4.work/run -H "x-run-secret: <RUN_SECRETの値>"
 ```
 
 取得内容が前回と同じソースはGeminiを呼ばずに前回の要約を使い回す(無料枠節約のため)。
 強制的に再要約したい場合は `?force=1` を付ける。
 
 ```bash
-curl -X POST "https://<デプロイ先のURL>/run?force=1" -H "x-run-secret: <RUN_SECRETの値>"
+curl -X POST "https://asa.eh6gac4.work/run?force=1" -H "x-run-secret: <RUN_SECRETの値>"
 ```
 
 以下を確認する:
@@ -98,6 +109,8 @@ curl https://<デプロイ先のURL>/logs -H "x-run-secret: <RUN_SECRETの値>"
 ```
 
 ## URL構成
+
+公開URL: https://asa.eh6gac4.work （`workers.dev` のURLも引き続き有効）
 
 朝刊らしく、日付ごとにユニークなURLを持つ「号」として過去に遡れる。
 
