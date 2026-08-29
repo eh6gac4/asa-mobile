@@ -1,8 +1,10 @@
 # asa-mobile
 
-Android Weekly / iOS Dev Weekly / TLDR AI のRSSをGeminiで日本語要約し、
-Cloudflare Workers上でパブリックなWebページとして公開するツール。個人利用。
-TLDR AI(日刊)は毎日、Android Weekly / iOS Dev Weekly(週刊)は月曜のみ更新する。
+Android Weekly / iOS Dev Weekly / TLDR AI と、AI各社(OpenAI / Anthropic / Google Gemini)の
+ニュースリリースのRSSをGeminiで日本語要約し、Cloudflare Workers上でパブリックなWebページとして
+公開するツール。個人利用。
+TLDR AI とニュースリリース3社(日刊)は毎日、Android Weekly / iOS Dev Weekly(週刊)は
+月曜のみ更新する。
 
 詳しいアーキテクチャや技術的負債は [`HANDOFF.md`](./HANDOFF.md) を参照。
 
@@ -67,7 +69,7 @@ gh secret set CLOUDFLARE_API_TOKEN -R eh6gac4/asa-mobile
 ### 8. 動作確認
 
 cronの発火(毎日5:00 JST。週刊ソースは月曜のみ)を待たずに手動実行できる。
-`/run` は3ソースすべてを対象に実行する。`x-run-secret` ヘッダーに手順5で登録した値を渡す。
+`/run` は6ソースすべてを対象に実行する。`x-run-secret` ヘッダーに手順5で登録した値を渡す。
 
 ```bash
 curl -X POST https://<デプロイ先のURL>/run -H "x-run-secret: <RUN_SECRETの値>"
@@ -82,7 +84,8 @@ curl -X POST "https://<デプロイ先のURL>/run?force=1" -H "x-run-secret: <RU
 
 以下を確認する:
 
-- 3ソース(Android Weekly / iOS Dev Weekly / TLDR AI)とも要約が生成されるか
+- 6ソース(Android Weekly / iOS Dev Weekly / TLDR AI / OpenAI / Anthropic / Google Gemini)とも
+  要約が生成されるか(ニュースリリース系3ソースのフィードURLは初回実行で死活を確認すること)
 - Gemini APIのレスポンス形式が変わっていないか(`data.candidates[0].content.parts[0].text` の構造に依存)
 
 デプロイ先のトップページ (`GET /`) にアクセスすると、最新号がHTMLで表示される。
