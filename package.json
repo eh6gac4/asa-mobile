@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Android Weekly / iOS Dev Weekly / TLDR AI のRSSを毎週まとめてGeminiで日本語要約し、Cloudflare Workers上で配信するツール",
+  "description": "Android Weekly / iOS Dev Weekly / TLDR AI と AI各社(OpenAI / Anthropic / Google Gemini)のニュースリリースのRSSをGeminiで日本語要約し、Cloudflare Workers上で配信するツール",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

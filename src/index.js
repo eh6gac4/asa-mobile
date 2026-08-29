@@ -13,6 +13,8 @@ const TLDR_AI_INBOX_KEY = "inbox:tldr-ai:latest";
 // inbox: 指定があるとメール受信(KV)を一次ソースとして優先し、無い/古い場合のみurlのRSSへ
 // フォールバックする(processFeedSource参照)。modeはフォールバック時に使う値なので、
 // メール優先ソースでも"multi"のまま変えないこと(scheduledの週次ゲート判定に影響するため)。
+// kind: プロンプトでソースの種別をGeminiに伝える語(buildPrompt参照)。省略時は"ニュースレター"。
+// 企業のニュースリリースを「ニュースレター」と呼ぶと文面が不自然になるため用意している。
 const FEEDS = [
   {
     name: "Android Weekly",
@@ -35,6 +37,29 @@ const FEEDS = [
     mode: "multi",
     inbox: TLDR_AI_INBOX_KEY,
     siteUrl: "https://tldr.tech/ai",
+  },
+  {
+    name: "OpenAI",
+    url: "https://openai.com/news/rss.xml",
+    mode: "multi",
+    kind: "ニュースリリース",
+    siteUrl: "https://openai.com/news/",
+  },
+  {
+    name: "Anthropic",
+    // Anthropic公式はRSSを提供していないため、第三者が生成・公開しているミラーを使う。
+    // TLDR AIのミラーと同様、停止やURL変更で取得できなくなるリスクがある(HANDOFF参照)。
+    url: "https://raw.githubusercontent.com/taobojlen/anthropic-rss-feed/main/anthropic_news_rss.xml",
+    mode: "multi",
+    kind: "ニュースリリース",
+    siteUrl: "https://www.anthropic.com/news",
+  },
+  {
+    name: "Google Gemini",
+    url: "https://blog.google/products-and-platforms/products/gemini/rss/",
+    mode: "multi",
+    kind: "ニュースリリース",
+    siteUrl: "https://blog.google/products-and-platforms/products/gemini/",
   },
 ];
 
@@ -305,12 +330,15 @@ const IMPACT_INSTRUCTION =
   `明確な影響が無ければ無理に作らず空文字列にしてください。`;
 
 function buildPrompt(feed, built) {
+  // 企業のニュースリリース系ソースは「ニュースレター」と呼ぶと文面が噛み合わないため、
+  // feed.kindで種別の語を差し替えられるようにしている(FEEDS参照)。
+  const kind = feed.kind ?? "ニュースレター";
   if (built.mode === "single") {
     const candidateLines = built.candidates
       .map((c, i) => `[${i}] ${c.text} — ${c.url}`)
       .join("\n");
     return (
-      `以下は「${feed.name}」というニュースレターの直近号の内容です。` +
+      `以下は「${feed.name}」という${kind}の直近号の内容です。` +
       `日本語で3〜5個のトピックに整理し、それぞれ見出し(15〜25字程度)と説明(1〜2文、40〜80字程度)を作成してください。` +
       `前置きや結びの文は不要です。\n` +
       `候補リンク一覧には、本文中の各トピックへのリンクだけでなく、広告・イベント告知・` +
@@ -328,7 +356,7 @@ function buildPrompt(feed, built) {
     .map((item, i) => `[${i}] ${item.title}\n${item.description}`)
     .join("\n\n");
   return (
-    `以下は「${feed.name}」というニュースレターの直近の記事一覧です。` +
+    `以下は「${feed.name}」という${kind}の直近の記事一覧です。` +
     `各記事について、日本語で見出し(15〜25字程度)と説明(1〜2文、40〜80字程度)を作成してください。` +
     `記事の順序を変えず、記事数ちょうどの件数を出力してください。前置きや結びの文は不要です。\n` +
     `${IMPACT_INSTRUCTION}\n\n${itemLines}`
@@ -802,6 +830,12 @@ function sourceSlug(sourceName) {
       return "ios";
     case "TLDR AI":
       return "tldr";
+    case "OpenAI":
+      return "openai";
+    case "Anthropic":
+      return "anthropic";
+    case "Google Gemini":
+      return "gemini";
     default:
       return "other";
   }
@@ -1025,6 +1059,9 @@ const PAGE_STYLES = `
     --accent-android: oklch(62% 0.15 155);
     --accent-ios: oklch(62% 0.15 255);
     --accent-tldr: oklch(62% 0.15 330);
+    --accent-openai: oklch(62% 0.13 195);
+    --accent-anthropic: oklch(64% 0.13 45);
+    --accent-gemini: oklch(62% 0.15 290);
     --accent-other: oklch(62% 0.15 40);
     --danger: oklch(58% 0.19 25);
     --good: oklch(55% 0.14 155);
@@ -1055,6 +1092,9 @@ const PAGE_STYLES = `
   .sources .dot.android { background: var(--accent-android); }
   .sources .dot.ios { background: var(--accent-ios); }
   .sources .dot.tldr { background: var(--accent-tldr); }
+  .sources .dot.openai { background: var(--accent-openai); }
+  .sources .dot.anthropic { background: var(--accent-anthropic); }
+  .sources .dot.gemini { background: var(--accent-gemini); }
   .sources .dot.other { background: var(--accent-other); }
 
   .feed { position: relative; padding-left: 20px; }
@@ -1068,6 +1108,9 @@ const PAGE_STYLES = `
   .row[data-source="android"] .node { background: var(--accent-android); }
   .row[data-source="ios"] .node { background: var(--accent-ios); }
   .row[data-source="tldr"] .node { background: var(--accent-tldr); }
+  .row[data-source="openai"] .node { background: var(--accent-openai); }
+  .row[data-source="anthropic"] .node { background: var(--accent-anthropic); }
+  .row[data-source="gemini"] .node { background: var(--accent-gemini); }
   .row[data-source="other"] .node { background: var(--accent-other); }
 
   .row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--soft); margin-bottom: 10px; }
@@ -1077,6 +1120,9 @@ const PAGE_STYLES = `
   .row[data-source="android"] .badge { color: var(--accent-android); }
   .row[data-source="ios"] .badge { color: var(--accent-ios); }
   .row[data-source="tldr"] .badge { color: var(--accent-tldr); }
+  .row[data-source="openai"] .badge { color: var(--accent-openai); }
+  .row[data-source="anthropic"] .badge { color: var(--accent-anthropic); }
+  .row[data-source="gemini"] .badge { color: var(--accent-gemini); }
   .row[data-source="other"] .badge { color: var(--accent-other); }
   .row-head a.issue { color: var(--soft); padding: 3px 2px; }
   @media (prefers-color-scheme: dark) { .row-head a.issue { color: var(--soft-dark); } }

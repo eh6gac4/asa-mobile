@@ -231,15 +231,12 @@ test("開発者への良い影響/悪い影響があるentryはimpactリスト�
   await expect(rows.nth(1).locator(".impact")).toHaveCount(0);
 });
 
-test("画面下部に参照元3サイトへのリンクが表示される", async ({ page }) => {
+test("画面下部に参照元6サイトへのリンクが表示される", async ({ page }) => {
   await page.setContent(renderHtml(mockDigest));
 
   const footer = page.locator("footer.sources");
   const links = footer.locator("a");
-  await expect(links).toHaveCount(3);
-  await expect(footer).toContainText("Android Weekly");
-  await expect(footer).toContainText("iOS Dev Weekly");
-  await expect(footer).toContainText("TLDR AI");
+  await expect(links).toHaveCount(6);
   await expect(footer.locator('a:has-text("Android Weekly")')).toHaveAttribute(
     "href",
     "https://androidweekly.net/",
@@ -249,6 +246,76 @@ test("画面下部に参照元3サイトへのリンクが表示される", asyn
     "https://iosdevweekly.com/",
   );
   await expect(footer.locator('a:has-text("TLDR AI")')).toHaveAttribute("href", "https://tldr.tech/ai");
+  await expect(footer.locator('a:has-text("OpenAI")')).toHaveAttribute("href", "https://openai.com/news/");
+  await expect(footer.locator('a:has-text("Anthropic")')).toHaveAttribute(
+    "href",
+    "https://www.anthropic.com/news",
+  );
+  await expect(footer.locator('a:has-text("Google Gemini")')).toHaveAttribute(
+    "href",
+    "https://blog.google/products-and-platforms/products/gemini/",
+  );
+});
+
+// ニュースリリース系ソース(OpenAI / Anthropic / Google Gemini)は、sourceSlug()に
+// caseを足し忘れると全部 data-source="other" に落ちて色分けが効かなくなる。
+// 描画時にソースごとのスラッグが付くことを確認する。
+test("ニュースリリース系ソースがソースごとのスラッグで描画される", async ({ page }) => {
+  const releaseDigest = {
+    generatedAt: "2026-08-29T00:00:00.000Z",
+    items: [
+      {
+        source: "OpenAI",
+        title: "",
+        link: "",
+        generatedAt: "2026-08-29T00:00:00.000Z",
+        entries: [
+          {
+            headline: "OpenAIの新モデル発表",
+            description: "推論性能を高めた新モデルが公開された。",
+            url: "https://openai.com/news/example/",
+            publishedAt: "2026-08-28T00:00:00.000Z",
+          },
+        ],
+      },
+      {
+        source: "Anthropic",
+        title: "",
+        link: "",
+        generatedAt: "2026-08-29T00:00:00.000Z",
+        entries: [
+          {
+            headline: "Anthropicの新機能",
+            description: "Claude向けの新機能が発表された。",
+            url: "https://www.anthropic.com/news/example",
+            publishedAt: "2026-08-27T00:00:00.000Z",
+          },
+        ],
+      },
+      {
+        source: "Google Gemini",
+        title: "",
+        link: "",
+        generatedAt: "2026-08-29T00:00:00.000Z",
+        entries: [
+          {
+            headline: "Geminiアプリの更新",
+            description: "Geminiアプリに新しい機能が追加された。",
+            url: "https://blog.google/products-and-platforms/products/gemini/example/",
+            publishedAt: "2026-08-26T00:00:00.000Z",
+          },
+        ],
+      },
+    ],
+  };
+
+  await page.setContent(renderHtml(releaseDigest));
+
+  await expect(page.locator('.row[data-source="openai"]')).toHaveCount(1);
+  await expect(page.locator('.row[data-source="anthropic"]')).toHaveCount(1);
+  await expect(page.locator('.row[data-source="gemini"]')).toHaveCount(1);
+  await expect(page.locator('.row[data-source="other"]')).toHaveCount(0);
+  await expect(page.locator('.row[data-source="openai"] .badge')).toHaveText("OpenAI");
 });
 
 test("ダイジェスト未生成時は案内メッセージが表示される", async ({ page }) => {

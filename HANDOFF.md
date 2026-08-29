@@ -4,8 +4,9 @@ Claude Codeでこのプロジェクトの続きを作業する人向けの引き
 
 ## プロジェクト概要
 
-Android Weekly / iOS Dev Weekly / TLDR AI のRSSをGeminiで日本語要約し、
-Cloudflare Workers上でパブリックなWebページとして公開するツール。個人利用。
+Android Weekly / iOS Dev Weekly / TLDR AI と、AI各社(OpenAI / Anthropic / Google Gemini)の
+ニュースリリースのRSSをGeminiで日本語要約し、Cloudflare Workers上でパブリックなWebページとして
+公開するツール。個人利用。
 
 - **自宅サーバーは使わない方針**（Cloudflareのみで完結させる）
 - コード・設定一式は `asa-mobile/` ディレクトリにまとまっている
@@ -51,7 +52,12 @@ asa-mobile/
    - `mode: "single"`（Android Weekly, iOS Dev Weekly）: 週刊フィード。最新1件のみ使用し、
      本番cronでは**JST基準の月曜のみ**取得する（`isWeeklyRefreshDay()`）。本番cronはUTC上は
      前日20:00に発火するため、判定は必ずJSTに変換してから行う。月曜以外はKVの前回値をそのまま維持
-   - `mode: "multi"`（TLDR AI）: 日刊フィードなので直近5件を連結し、**毎日**取得・要約する
+   - `mode: "multi"`（TLDR AI / OpenAI / Anthropic / Google Gemini）: 日刊フィードなので
+     直近5件を連結し、**毎日**取得・要約する。ニュースリリース系3ソース（OpenAI / Anthropic /
+     Google Gemini）は1 item = 1リリースでこの形にそのまま乗るため、`FEEDS`への追加だけで
+     取得ロジックの変更は不要だった
+   - `kind`（任意）: プロンプトでソースの種別をGeminiに伝える語（`buildPrompt`）。省略時は
+     "ニュースレター"。ニュースリリース系3ソースは"ニュースリリース"を指定している
 3. 各ソースのcontentをGemini API（`gemini-3.6-flash`）に投げ、`responseSchema`で構造化出力
    （見出し＋説明文＋元記事URLの配列 `entries`）を強制して日本語要約。429/5xxは指数バックオフで
    最大3回リトライ。週刊ソース(`mode: "single"`)は号のHTML本文から`extractLinkCandidates`で
@@ -107,6 +113,18 @@ Markdown太字変換、staleカード、リンク欠落時の防御、エラー�
 
 ## 既知の注意点・技術的負債
 
+- **Anthropicの公式RSSは存在しない**。`https://raw.githubusercontent.com/taobojlen/anthropic-rss-feed/main/anthropic_news_rss.xml`
+  という第三者が生成・公開しているミラーを使っている（追加時点で最新記事まで配信されていることは確認済み）。
+  TLDR AIのミラーと同じく、停止・更新停止・URL変更で取得できなくなるリスクがある。
+- **OpenAI / Google GeminiのフィードURLは本番でしか死活確認できていない**。追加作業を行った
+  サンドボックスは egress ポリシーで `openai.com` / `blog.google` に到達できなかったため。
+  `RSS取得失敗: <url> (status 404)` がログに出た場合はURLの差し替えが要る。Geminiの候補は
+  `https://blog.google/products/gemini/rss/`（旧パス）や
+  `https://blog.google/innovation-and-ai/technology/rss/`（AI枠・やや広め）。
+- **Gemini APIの消費がソース増で増えた**。無料枠は1日20リクエストで、ソースは6つ。
+  内容が前回と同じソースは`contentFingerprint`一致でGeminiを呼ばないため実消費は
+  「更新があったソース数」だが、全ソースが更新された日は本番cronで6リクエスト、
+  さらにリトライcronの分が乗る。`/run`の連打は今まで以上に危険。
 - **TLDR AIのRSSは非公式ミラー**（`https://bullrich.dev/tldr-rss/ai.rss`）を使用。TLDR公式はメール配信のみでRSSを提供していないため。このミラーが停止・URL変更した場合は動かなくなる。代替手段の検討や死活監視は未実装。
 - RSS内のHTMLタグは正規表現で簡易除去しているだけ（`replace(/<[^>]+>/g, " ")`）。凝ったマークアップだと余計な空白やノイズが残る可能性あり。同様に `extractLinkCandidates` も `<a href="...">` を正規表現で拾うだけなので、凝ったマークアップでは候補漏れ・誤抽出が起こり得る。
 - 週刊ソースの記事リンクは Gemini が選んだ `candidateIndex` に依存する。プロンプトで「候補に無いURLを作り出さない」よう指示しているが、対応付けを誤る可能性はゼロではない（誤った記事にリンクする、または本来対応する記事があるのに `null` にする）。
@@ -121,8 +139,11 @@ Markdown太字変換、staleカード、リンク欠落時の防御、エラー�
 
 ## 次にやること（優先順）
 
-1. 数日運用して、TLDR AIが毎日・Android/iOS Weeklyが週次で正しく更新されるか確認
-2. （余裕があれば）カスタムドメイン設定、TLDR AIミラーが死んだ時のフォールバック
+1. ニュースリリース系3ソース（OpenAI / Anthropic / Google Gemini）のフィードURLが本番で
+   生きているかを`/logs`で確認する（特にGoogle GeminiのRSSパス）
+2. 数日運用して、TLDR AI・ニュースリリース3社が毎日・Android/iOS Weeklyが週次で
+   正しく更新されるか確認
+3. （余裕があれば）カスタムドメイン設定、TLDR AI / Anthropicミラーが死んだ時のフォールバック
 
 ## 参照した外部情報
 
