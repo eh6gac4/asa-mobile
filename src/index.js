@@ -405,12 +405,13 @@ function buildResponseSchema(built) {
  * 429/5xx (高負荷時の503等)は一時的なエラーとみなし、指数バックオフでリトライする。
  * Retry-Afterヘッダがあればそちらを優先する（上限あり）。
  */
-async function summarizeEntries(env, feed, built) {
+async function summarizeEntries(env, feed, built, geminiMeta = {}) {
   const prompt = buildPrompt(feed, built);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
   let lastErr;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    geminiMeta.attempts = attempt;
     const res = await fetch(url, {
       method: "POST",
       headers: {
@@ -429,6 +430,7 @@ async function summarizeEntries(env, feed, built) {
         },
       }),
     });
+    geminiMeta.status = res.status;
 
     if (res.ok) {
       const data = await res.json();
@@ -481,8 +483,8 @@ function stripLabelPrefix(text) {
   return text.replace(LABEL_PREFIX_RE, "");
 }
 
-async function summarizeIntoItem(env, feed, built, title) {
-  const rawEntries = await summarizeEntries(env, feed, built);
+async function summarizeIntoItem(env, feed, built, title, geminiMeta = {}) {
+  const rawEntries = await summarizeEntries(env, feed, built, geminiMeta);
 
   const entries = rawEntries
     .map((raw, index) => {
@@ -554,17 +556,35 @@ function errorMessage(err) {
  * (表示には出さない設計)が、logEntriesには残す。1箇所にまとめることで、
  * generateDigest/retryFailedSourcesの各分岐でsourceの取り違えなどが起きないようにする。
  */
-function recordSourceResult(results, logEntries, source, resultItem, status, error) {
+function recordSourceResult(results, logEntries, source, resultItem, status, error, meta = {}) {
   results.push(resultItem);
-  logEntries.push(error === undefined ? { source, status } : { source, status, error });
+  const log = { source, status };
+  if (meta.ms !== undefined) log.ms = meta.ms;
+  if (meta.input !== undefined) log.input = meta.input;
+  if (Array.isArray(resultItem.entries)) log.entries = resultItem.entries.length;
+  if (meta.gemini && meta.gemini.attempts !== undefined) log.gemini = meta.gemini;
+  if (error !== undefined) log.error = error;
+  logEntries.push(log);
 }
 
+/**
+ * 1フィードを取得・要約し、号アイテムと調査用メタ情報を返す。
+ * meta は実行ログ専用で、KVに保存する item には混ぜない。
+ * meta.status: "skipped"(fingerprint一致でGemini未実行) | "ok"(要約実行)
+ * meta.input: "inbox"(受信メール) | "rss"
+ * meta.gemini: { attempts, status }(要約を実行した場合のみ、summarizeEntries参照)
+ */
 async function processFeedSource(env, feed, prevItem, nowISO, { force = false } = {}) {
+  const startedAt = Date.now();
   let built = null;
   let title = "";
+  let input = "rss";
   if (feed.inbox) {
     built = await buildInboxContent(env, feed);
-    if (built) title = built.subject;
+    if (built) {
+      title = built.subject;
+      input = "inbox";
+    }
   }
   if (!built) {
     const items = await fetchFeedItems(feed.url);
@@ -577,11 +597,15 @@ async function processFeedSource(env, feed, prevItem, nowISO, { force = false } 
     // 取得内容が前回から変わっていない。entriesは既にseen:urls済みのはずなので
     // buildEditionで弾かれ号には出ない。取得自体は成功しているのでstaleは落とす。
     const { stale, ...rest } = prevItem;
-    return rest;
+    return { item: rest, meta: { status: "skipped", ms: Date.now() - startedAt, input } };
   }
 
-  const item = await summarizeIntoItem(env, feed, built, title);
-  return { ...item, fingerprint, generatedAt: nowISO };
+  const gemini = {};
+  const item = await summarizeIntoItem(env, feed, built, title, gemini);
+  return {
+    item: { ...item, fingerprint, generatedAt: nowISO },
+    meta: { status: "ok", ms: Date.now() - startedAt, input, gemini },
+  };
 }
 
 /**
@@ -610,6 +634,7 @@ async function generateDigest(env, feedsToProcess = FEEDS, { force = false, trig
     }
   }
 
+  const startedAt = Date.now();
   const nowISO = new Date().toISOString();
   const targetNames = new Set(feedsToProcess.map((f) => f.name));
   const results = [];
@@ -618,14 +643,22 @@ async function generateDigest(env, feedsToProcess = FEEDS, { force = false, trig
   for (const feed of FEEDS) {
     if (!targetNames.has(feed.name)) {
       // 今回は対象外(例: 週次ソースを非月曜に実行しない)。前回の結果を維持する。
+      // ログには untargeted として残し「なぜ今日この号が出ていないか」を追えるようにする。
       const prevItem = prevBySource.get(feed.name);
       if (prevItem) results.push(prevItem);
+      logEntries.push({ source: feed.name, status: "untargeted" });
       continue;
     }
 
     try {
-      const item = await processFeedSource(env, feed, prevBySource.get(feed.name), nowISO, { force });
-      recordSourceResult(results, logEntries, feed.name, item, "ok");
+      const { item, meta } = await processFeedSource(
+        env,
+        feed,
+        prevBySource.get(feed.name),
+        nowISO,
+        { force },
+      );
+      recordSourceResult(results, logEntries, feed.name, item, meta.status, undefined, meta);
     } catch (err) {
       const message = errorMessage(err);
       const prevItem = prevBySource.get(feed.name);
@@ -638,8 +671,14 @@ async function generateDigest(env, feedsToProcess = FEEDS, { force = false, trig
   }
 
   const digest = { generatedAt: nowISO, items: results };
-  await persistDigest(env, digest);
-  await appendRunLog(env, { at: nowISO, trigger, results: logEntries });
+  const edition = await persistDigest(env, digest);
+  await appendRunLog(env, {
+    at: nowISO,
+    trigger,
+    ms: Date.now() - startedAt,
+    edition,
+    results: logEntries,
+  });
 
   return digest;
 }
@@ -657,6 +696,7 @@ async function retryFailedSources(env) {
   const needsRetry = digest.items.some((item) => item.error || item.stale);
   if (!needsRetry) return digest;
 
+  const startedAt = Date.now();
   const nowISO = new Date().toISOString();
   const updatedItems = [];
   const logEntries = [];
@@ -674,8 +714,8 @@ async function retryFailedSources(env) {
     }
 
     try {
-      const recovered = await processFeedSource(env, feed, item, nowISO);
-      recordSourceResult(updatedItems, logEntries, item.source, recovered, "recovered");
+      const { item: recovered, meta } = await processFeedSource(env, feed, item, nowISO);
+      recordSourceResult(updatedItems, logEntries, item.source, recovered, "recovered", undefined, meta);
     } catch (err) {
       // リトライも失敗。既存のerror/staleエントリをそのまま維持する。
       recordSourceResult(updatedItems, logEntries, item.source, item, "error", errorMessage(err));
@@ -683,10 +723,16 @@ async function retryFailedSources(env) {
   }
 
   const digestOut = { generatedAt: nowISO, items: updatedItems };
-  await persistDigest(env, digestOut);
+  const edition = await persistDigest(env, digestOut);
   // needsRetryがtrueの時点でerror/staleが最低1件あり、それは必ずこのループを通るため
   // logEntriesは常に1件以上ある。
-  await appendRunLog(env, { at: nowISO, trigger: "retry", results: logEntries });
+  await appendRunLog(env, {
+    at: nowISO,
+    trigger: "retry",
+    ms: Date.now() - startedAt,
+    edition,
+    results: logEntries,
+  });
 
   return digestOut;
 }
@@ -695,18 +741,47 @@ async function retryFailedSources(env) {
 // 実行のたびにappendRunLogを呼ぶため、無制限に貯めるとKVが肥大化する。
 const LOG_MAX_ENTRIES = 50;
 
+// 1ソースあたりのエラー文の保存上限。Geminiの想定外レスポンスは生JSON全文を
+// エラー文に載せるため(summarizeEntries参照)、切り詰めないと50件でKVが肥大化する。
+const LOG_ERROR_MAX_CHARS = 1000;
+
+function truncateLogErrors(entry) {
+  for (const r of entry.results ?? []) {
+    if (typeof r.error === "string" && r.error.length > LOG_ERROR_MAX_CHARS) {
+      const omitted = r.error.length - LOG_ERROR_MAX_CHARS;
+      r.error = `${r.error.slice(0, LOG_ERROR_MAX_CHARS)}…(${omitted}字省略)`;
+    }
+  }
+  return entry;
+}
+
 /**
  * 1回の実行(cron発火または手動/run)の結果をKVの"logs"キーに追記する。
  * 従来はソース単位の失敗(error/stale)がKVに残らず、原因調査ができなかった
  * (前回成功分で上書きされるため)。ここに追記しておけば、staleが続く原因の
- * エラーメッセージを後から遡って確認できる。
- * trigger: どの経路からの実行か("manual" | cron文字列 | "retry")。
- * results: [{ source, status: "ok"|"stale"|"error"|"recovered", error? }]
+ * エラーメッセージや、号が発行されなかった理由を後から遡って確認できる。
+ *
+ * entry: {
+ *   at, trigger,          // trigger: "manual" | cron文字列 | "retry"
+ *   ms,                   // 実行全体の所要時間(ms)
+ *   edition: {            // persistDigestの返り値。その日の号の発行可否
+ *     published, dateKey,
+ *     reason?,            // published:false のときだけ。号が出なかった内訳
+ *   },
+ *   results: [{
+ *     source,
+ *     status,             // "ok"|"skipped"|"stale"|"error"|"recovered"|"untargeted"
+ *     ms?, entries?,      // 所要時間 / 生成トピック件数
+ *     input?,             // "inbox"|"rss" — 本文の取得元
+ *     gemini?,            // { attempts, status } — 要約APIの再試行状況
+ *     error?,             // LOG_ERROR_MAX_CHARS で切り詰め
+ *   }]
+ * }
  */
 async function appendRunLog(env, entry) {
   const raw = await env.DIGEST_KV.get("logs");
   const logs = raw ? JSON.parse(raw) : [];
-  logs.push(entry);
+  logs.push(truncateLogErrors(entry));
   // appendRunLogは1回の実行につき1件しか積まないため、超過は常に高々1件。
   if (logs.length > LOG_MAX_ENTRIES) logs.shift();
   await env.DIGEST_KV.put("logs", JSON.stringify(logs));
@@ -765,6 +840,9 @@ export function buildEdition(digest, seenMap, dateKey) {
  * generateDigest/retryFailedSourcesの両方から呼ぶ(旧実装ではこの3行が2箇所に重複していた)。
  * dateKeyはJST基準の暦日(jstDateKey参照)。本番cronは20:00 UTC=翌5:00 JSTに発火するため、
  * UTCの暦日をそのまま使うと号の日付が1日ズレる。
+ *
+ * 返り値 { published, dateKey, reason? } は実行ログの edition フィールドに入る。
+ * 新着ゼロで号を作らなかった場合は published:false と、その内訳(reason)を返す。
  */
 async function persistDigest(env, digest) {
   const dateKey = jstDateKey(digest.generatedAt);
@@ -778,7 +856,17 @@ async function persistDigest(env, digest) {
   const edition = buildEdition(digest, seenMap, dateKey);
   if (edition.items.length === 0) {
     // その日の新着が無い(週刊ソースの非月曜、取得失敗しか無かった日など)。号は作らない。
-    return;
+    // 内訳を返して実行ログに「なぜ号が出なかったか」を残す。
+    const errorItems = digest.items.filter((it) => it.error).length;
+    const staleItems = digest.items.filter((it) => it.stale).length;
+    const freshCandidates = digest.items.filter(
+      (it) => !it.error && (it.entries?.length ?? 0) > 0,
+    ).length;
+    return {
+      published: false,
+      dateKey,
+      reason: { errorItems, staleItems, freshCandidates, note: "新着entryなし(全て既出または要約なし)" },
+    };
   }
 
   await env.DIGEST_KV.put(`edition:${dateKey}`, JSON.stringify(edition));
@@ -802,6 +890,8 @@ async function persistDigest(env, digest) {
     if (seenMap[key] < cutoff) delete seenMap[key];
   }
   await env.DIGEST_KV.put("seen:urls", JSON.stringify(seenMap));
+
+  return { published: true, dateKey };
 }
 
 function escapeHtml(str) {
