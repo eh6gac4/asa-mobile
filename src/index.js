@@ -76,6 +76,7 @@ const INBOX_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // 経路を塞ぐため。SPF/DKIM/DMARCの検証自体はCloudflare Email Routing側で完了している前提)。
 const TLDR_AI_ALLOWED_SENDER_DOMAINS = ["tldrnewsletter.com", "tldr.tech"];
 const GEMINI_MODEL = "gemini-3.6-flash";
+const GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite";
 
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
 
@@ -402,69 +403,77 @@ function buildResponseSchema(built) {
  * responseMimeType: "application/json" + responseSchema で構造化出力を強制する
  * （箇条書きテキストのパース処理が不要になる）。
  *
- * 429/5xx (高負荷時の503等)は一時的なエラーとみなし、指数バックオフでリトライする。
+ * 本番モデルの503は軽量モデルへ切り替える。その他の429/5xxは指数バックオフでリトライする。
  * Retry-Afterヘッダがあればそちらを優先する（上限あり）。
  */
-async function summarizeEntries(env, feed, built, geminiMeta = {}) {
+export async function summarizeEntries(env, feed, built, geminiMeta = {}) {
   const prompt = buildPrompt(feed, built);
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-
   let lastErr;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    geminiMeta.attempts = attempt;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": env.GEMINI_API_KEY,
-      },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          // single mode(候補リンクとの対応付け)は他トピックとの照合が必要な分、複雑な
-          // 推論が要る。multi modeはリンクが確定済みで見出し・説明文の生成だけなので
-          // "low"のままで十分（コスト・レイテンシ優先）。
-          thinkingConfig: { thinkingLevel: built.mode === "single" ? "medium" : "low" },
-          responseMimeType: "application/json",
-          responseSchema: buildResponseSchema(built),
+
+  for (const model of [GEMINI_MODEL, GEMINI_FALLBACK_MODEL]) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    geminiMeta.model = model;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      geminiMeta.attempts = attempt;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": env.GEMINI_API_KEY,
         },
-      }),
-    });
-    geminiMeta.status = res.status;
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            // 週刊ソースはリンク照合が必要なため、日刊より推論量を増やす。
+            thinkingConfig: { thinkingLevel: built.mode === "single" ? "medium" : "low" },
+            responseMimeType: "application/json",
+            responseSchema: buildResponseSchema(built),
+          },
+        }),
+      });
+      geminiMeta.status = res.status;
 
-    if (res.ok) {
-      const data = await res.json();
-      const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!raw) {
-        throw new Error(`Gemini APIレスポンスの形式が想定外 (${feed.name}): ${JSON.stringify(data)}`);
+      if (res.ok) {
+        const data = await res.json();
+        const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!raw) {
+          throw new Error(`Gemini APIレスポンスの形式が想定外 (${feed.name}): ${JSON.stringify(data)}`);
+        }
+
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {
+          throw new Error(`Gemini APIのJSON出力をパースできなかった (${feed.name}): ${raw}`);
+        }
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          throw new Error(`Gemini APIの出力が空または配列でない (${feed.name}): ${raw}`);
+        }
+        return parsed;
       }
 
-      let parsed;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        throw new Error(`Gemini APIのJSON出力をパースできなかった (${feed.name}): ${raw}`);
+      const errBody = await res.text().catch(() => "");
+      lastErr = new Error(`Gemini API失敗 (${feed.name}, ${model}): status ${res.status} ${errBody}`);
+
+      // 本番モデルの503は他モデルで回復できる。待機を重ねず軽量モデルへ切り替える。
+      if (model === GEMINI_MODEL && res.status === 503) {
+        geminiMeta.fallbackFrom = GEMINI_MODEL;
+        break;
       }
-      if (!Array.isArray(parsed) || parsed.length === 0) {
-        throw new Error(`Gemini APIの出力が空または配列でない (${feed.name}): ${raw}`);
+
+      const retryable = RETRYABLE_STATUS.has(res.status);
+      if (!retryable || attempt === MAX_ATTEMPTS) {
+        throw lastErr;
       }
-      return parsed;
+
+      const retryAfterSec = Number(res.headers.get("Retry-After"));
+      const delayMs =
+        Number.isFinite(retryAfterSec) && retryAfterSec > 0
+          ? Math.min(retryAfterSec * 1000, RETRY_MAX_DELAY_MS)
+          : Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS);
+      await sleep(delayMs);
     }
-
-    const errBody = await res.text().catch(() => "");
-    lastErr = new Error(`Gemini API失敗 (${feed.name}): status ${res.status} ${errBody}`);
-
-    const retryable = RETRYABLE_STATUS.has(res.status);
-    if (!retryable || attempt === MAX_ATTEMPTS) {
-      throw lastErr;
-    }
-
-    const retryAfterSec = Number(res.headers.get("Retry-After"));
-    const delayMs =
-      Number.isFinite(retryAfterSec) && retryAfterSec > 0
-        ? Math.min(retryAfterSec * 1000, RETRY_MAX_DELAY_MS)
-        : Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS);
-    await sleep(delayMs);
   }
 
   throw lastErr;
