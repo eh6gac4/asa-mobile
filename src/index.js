@@ -1449,10 +1449,15 @@ export default {
     if (request.method === "POST" && url.pathname === "/run") {
       const unauthorized = requireRunSecret(request, env);
       if (unauthorized) return unauthorized;
+      // ?retry=1 は失敗したソースだけを再処理する。週刊ソースの不要な再要約を避け、
+      // 朝刊の復旧に必要な処理だけを行う。
+      const retry = url.searchParams.get("retry") === "1";
       // ?force=1 で、取得内容が前回と同じでもfingerprintキャッシュを無視して強制的に
       // 再要約する(要約が失敗気味だったときの手動やり直し用)。
       const force = url.searchParams.get("force") === "1";
-      const digest = await generateDigest(env, FEEDS, { force });
+      const digest = retry
+        ? await retryFailedSources(env)
+        : await generateDigest(env, FEEDS, { force });
       return new Response(JSON.stringify(digest, null, 2), {
         headers: { "Content-Type": "application/json; charset=utf-8" },
       });
