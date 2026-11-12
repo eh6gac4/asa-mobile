@@ -75,6 +75,12 @@ cronの発火(毎日5:00 JST。週刊ソースは月曜のみ)を待たずに手
 curl -X POST https://<デプロイ先のURL>/run -H "x-run-secret: <RUN_SECRETの値>"
 ```
 
+今朝の生成で失敗したソースだけを再実行する場合は `?retry=1` を使う。成功済みのソースは再取得しない。
+
+```bash
+curl -X POST "https://<デプロイ先のURL>/run?retry=1" -H "x-run-secret: <RUN_SECRETの値>"
+```
+
 取得内容が前回と同じソースはGeminiを呼ばずに前回の要約を使い回す(無料枠節約のため)。
 強制的に再要約したい場合は `?force=1` を付ける。
 
